@@ -79,8 +79,8 @@ proc raiseIOSelectorsError[T](message: T) =
   var err = newException(IOSelectorsException, msg)
   raise err
 
-#[proc setNonBlocking(fd: cint) {.inline.} =
-  setBlocking(fd.SocketHandle, false)]#
+proc setNonBlocking(fd: cint) {.inline.} =
+  setBlocking(fd.SocketHandle, false)
 
 import std/posix
 
@@ -149,3 +149,41 @@ elif defined(nuttx):
   include ioselects/ioselectors_epoll
 else:
    {.fatal: "This platform is not supported.".}
+
+# The bundled epoll backend defines these. Dispatchers call them on every
+# platform, so the kqueue (and other) backends need the same procs.
+when defined(nimIoselector):
+  const usesBundledEpoll = nimIoselector == "epoll"
+else:
+  const usesBundledEpoll = defined(linux) and not defined(emscripten)
+
+when not usesBundledEpoll:
+  from guildenserver import shuttingdown
+
+  proc getSafelyData*[T](default: T, s: Selector[T], fd: SocketHandle|int): T {.raises: [].} =
+    let fdi = int(fd)
+    if fdi < 0 or fdi >= s.maxFD or s.fds[fdi].ident == InvalidIdent:
+      return default
+    result = s.fds[fdi].data
+
+  proc selectFast*[T](s: Selector[T]): ReadyKey =
+    var results: array[1, ReadyKey]
+    while true:
+      if shuttingdown: return
+      let count = selectInto(s, -1, results)
+      if shuttingdown: return
+      if count == 1 and results[0].events.len > 0:
+        return results[0]
+
+  proc registerEPOLLETReadHandle*[T](s: Selector[T], fd: int | SocketHandle, data: T) =
+    when bsdPlatform:
+      let fdi = int(fd)
+      s.checkFd(fdi)
+      doAssert(s.fds[fdi].ident == InvalidIdent, "Descriptor $# already registered" % $fdi)
+      s.setKey(fdi, {Event.Read}, 0, data)
+      modifyKQueue(s, uint(fdi), EVFILT_READ, EV_ADD or EV_CLEAR, 0, 0, nil)
+      inc(s.count)
+      when not declared(CACHE_EVENTS):
+        flushKQueue(s)
+    else:
+      s.registerHandle(fd, {Event.Read}, data)

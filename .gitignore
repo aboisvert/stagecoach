@@ -1,5 +1,6 @@
 nim.cfg
 examples/nim.cfg
+bin/
 examples/wrkbin
 createdocs.nim
 todo.md
