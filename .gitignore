@@ -3,3 +3,7 @@ examples/nim.cfg
 examples/wrkbin
 createdocs.nim
 todo.md
+nimble.develop
+nimble.paths
+nimbledeps
+config.nims
