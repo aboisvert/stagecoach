@@ -49,6 +49,11 @@ proc shutdownImpl() {.nimcall, gcsafe, raises: [].} =
 
 shutdownCallbacks.add(shutdownImpl)
 
+proc restoreDeferredSocket(server: GuildenServer, socket: SocketHandle, restoreContext: pointer) {.gcsafe, nimcall, raises: [].} =
+  if restoreContext.isNil: return
+  cast[Client](restoreContext).processing.store(false)
+
+
 proc suspend(server: GuildenServer, sleepmillisecs: int) {.gcsafe, nimcall, raises: [].} =
   server.log(lvlAll, "suspending thread " & $getThreadId() & " for " & $sleepmillisecs & " millisecs") 
   sleep(sleepmillisecs)
@@ -104,8 +109,22 @@ proc clientThread(server: GuildenServer) {.thread.} =
   
     server.log(lvlAll, "handleRead starts for socket " & $socket & " at thread " & $getThreadId())
 
+    var deferred = false
     while true:
+      guildenDispatcherWorker = true
+      pendingRestoreContext = cast[pointer](client)
+      acquirePendingSlot(server)
+      if unlikely(shuttingdown):
+        guildenDispatcherWorker = false
+        releasePendingSlot(server)
+        break
       handleRead(server, socket, client.customdata)
+      guildenDispatcherWorker = false
+      if requestDeferred:
+        relinquishPendingSlotHold()
+        deferred = true
+        break
+      releasePendingSlot(server)
       if unlikely(shuttingdown): break
       let ret = recv(socket, addr probebuffer[0], 1, MSG_PEEK or MSG_DONTWAIT)
       if ret < 0:
@@ -116,7 +135,8 @@ proc clientThread(server: GuildenServer) {.thread.} =
       elif ret == 0: break
       else: continue
 
-    store(client.processing, false)
+    if not deferred:
+      store(client.processing, false)
     server.log(lvlAll, "handleRead finished for socket " & $socket)
 
   if not isNil(server.threadFinalizerCallback): server.threadFinalizerCallback()
@@ -280,6 +300,7 @@ proc start*(server: GuildenServer, port: int, threadpoolsize: uint = 0): bool {.
   server.closeSocketCallback = closeSocketImpl
   server.getFlagsCallback = getFlagsImpl
   server.setFlagsCallback = setFlagsImpl
+  server.restoreDeferredSocketCallback = restoreDeferredSocket
   if port > 0: createSelector(server)
   startClientthreads(server)
   if port > 0:

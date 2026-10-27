@@ -32,7 +32,9 @@ from std/posix import SocketHandle, INVALID_SOCKET, SIGINT, getpid, SIGTERM, onS
 from std/net import Socket, newSocket
 from std/nativesockets import close
 from std/strutils import replace
+import std/tables
 from os import sleep
+import locks
 export SocketHandle, INVALID_SOCKET, posix.`==`, Level
 
 
@@ -74,6 +76,13 @@ type
   OnCloseSocketCallback* = proc(server: GuildenServer, socket: SocketHandle, cause: SocketCloseCause, msg: string){.gcsafe, nimcall, raises: [].} ## The `msg` parameter may contain furher info about the cause. For example, in case of websocket ClosedByClient, `msg` contains the status code.]#
   GetFlagsCallback* = proc(server: GuildenServer, socket: SocketHandle): int {.nimcall, gcsafe, raises: [].}
   SetFlagsCallback* = proc(server: GuildenServer, socket: SocketHandle, newflags: int): bool {.nimcall, gcsafe, raises: [].}
+  RestoreDeferredSocketCallback* = proc(server: GuildenServer, socket: SocketHandle, restoreContext: pointer) {.gcsafe, nimcall, raises: [].}
+
+  PendingReply* = ref object
+    server*: GuildenServer
+    socket*: SocketHandle
+    restoreContext*: pointer
+    completed*: bool
 
   GuildenServerObj* {.inheritable.} = object
     port*: uint16
@@ -92,6 +101,12 @@ type
     onCloseSocketCallback*: OnCloseSocketCallback
     getFlagsCallback*: GetFlagsCallback
     setFlagsCallback*: SetFlagsCallback
+    maxPendingRequests*: int
+    pendingCount: int
+    pendingLock: Lock
+    pendingCond: Cond
+    pendingByFd: tables.Table[int, PendingReply]
+    restoreDeferredSocketCallback*: RestoreDeferredSocketCallback
 
   GuildenServer* = ptr GuildenServerObj
 
@@ -105,7 +120,12 @@ var
   shuttingdown* = false ## Global variable that all code is expected to observe and abide to (check this inside your loops every now and then...).
   socketcontext* {.threadvar.}: SocketContext
   ## Access to data relating to the current socket request. Various servers offer templates to access their own more specialized data, such as the `http` and `ws` templates of the httpserver and websocketserver, respectively.
+  requestDeferred* {.threadvar.}: bool
+  pendingRestoreContext* {.threadvar.}: pointer
+  pendingSlotHeld* {.threadvar.}: bool
+  guildenDispatcherWorker* {.threadvar.}: bool
   nextid: int
+  pendingServers: seq[GuildenServer]
   shutdownCallbacks*: seq[proc() {.nimcall, gcsafe, raises: [].}]
 
 
@@ -118,6 +138,10 @@ proc shutdown*() =
   {.gcsafe.}:
     shuttingdown = true
     for shutdownCallback in shutdownCallbacks: shutdownCallback()
+    for server in pendingServers:
+      acquire(server.pendingLock)
+      broadcast(server.pendingCond)
+      release(server.pendingLock)
  
  
 {.hint[XDeclaredButNotUsed]:off.}
@@ -147,6 +171,86 @@ template log*(theserver: GuildenServer, level: Level, source: string, message: s
       theserver.logCallback(level, source, message)
 
 
+proc initPendingState*(server: GuildenServer) =
+  if server.maxPendingRequests < 1: return
+  initLock(server.pendingLock)
+  initCond(server.pendingCond)
+  server.pendingByFd = tables.initTable[int, PendingReply]()
+  server.pendingCount = 0
+  pendingServers.add(server)
+
+
+proc acquirePendingSlot*(server: GuildenServer) {.gcsafe, raises: [].} =
+  pendingSlotHeld = false
+  if server.maxPendingRequests < 1: return
+  acquire(server.pendingLock)
+  while server.pendingCount >= server.maxPendingRequests and not shuttingdown:
+    wait(server.pendingCond, server.pendingLock)
+  if shuttingdown:
+    release(server.pendingLock)
+    return
+  server.pendingCount += 1
+  pendingSlotHeld = true
+  release(server.pendingLock)
+
+
+proc releasePendingSlotCount*(server: GuildenServer) {.gcsafe, raises: [].} =
+  if server.maxPendingRequests < 1: return
+  acquire(server.pendingLock)
+  if server.pendingCount > 0:
+    server.pendingCount -= 1
+  signal(server.pendingCond)
+  release(server.pendingLock)
+
+
+proc releasePendingSlot*(server: GuildenServer) {.gcsafe, raises: [].} =
+  if server.maxPendingRequests < 1 or not pendingSlotHeld: return
+  pendingSlotHeld = false
+  releasePendingSlotCount(server)
+
+
+proc relinquishPendingSlotHold*() {.inline.} =
+  pendingSlotHeld = false
+
+
+proc registerPendingReply*(server: GuildenServer, pending: PendingReply) {.gcsafe, raises: [].} =
+  if server.maxPendingRequests < 1: return
+  acquire(server.pendingLock)
+  server.pendingByFd[int(pending.socket)] = pending
+  release(server.pendingLock)
+
+
+proc completeDeferredRequest*(pending: PendingReply) {.gcsafe, raises: [].} =
+  if pending.isNil or pending.completed: return
+  pending.completed = true
+  let server = pending.server
+  if server.maxPendingRequests < 1: return
+  var hadEntry = false
+  acquire(server.pendingLock)
+  if server.pendingByFd.getOrDefault(int(pending.socket)) == pending:
+    server.pendingByFd.del(int(pending.socket))
+    hadEntry = true
+  release(server.pendingLock)
+  if not isNil(server.restoreDeferredSocketCallback):
+    server.restoreDeferredSocketCallback(server, pending.socket, pending.restoreContext)
+  if hadEntry:
+    releasePendingSlotCount(server)
+
+
+proc cancelPendingForSocket*(server: GuildenServer, socket: SocketHandle) {.gcsafe, raises: [].} =
+  if server.maxPendingRequests < 1: return
+  var pending: PendingReply
+  let fd = int(socket)
+  acquire(server.pendingLock)
+  pending = server.pendingByFd.getOrDefault(fd)
+  if not pending.isNil:
+    server.pendingByFd.del(fd)
+  release(server.pendingLock)
+  if not pending.isNil and not pending.completed:
+    pending.completed = true
+    releasePendingSlotCount(server)
+
+
 proc initialize*(server: GuildenServer, loglevel: Level) =
   server.id = nextid
   nextid += 1
@@ -171,6 +275,7 @@ proc initializeThread*(server: GuildenServer) =
 proc handleRead*(theserver: GuildenServer, socket: SocketHandle, customdata: pointer) =
   {.gcsafe.}:
     if unlikely(socket == INVALID_SOCKET or shuttingdown): return
+    requestDeferred = false
     socketcontext.server = theserver
     socketcontext.socket = socket
     socketcontext.customdata = customdata
@@ -209,6 +314,7 @@ proc logClose(server: GuildenServer, socket: SocketHandle, cause = CloseCalled, 
 proc closeSocket*(server: GuildenServer, socket: SocketHandle, cause = CloseCalled, msg = "") {.gcsafe, nimcall, raises: [].} =
   ## Call this to close any socket connection.
   if socket == INVALID_SOCKET: return
+  cancelPendingForSocket(server, socket)
   logClose(server, socket, cause, msg)
   if not isNil(server.closeSocketCallback):
     server.closeSocketCallback(server, socket, cause, msg)

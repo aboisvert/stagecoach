@@ -154,13 +154,19 @@ when defined(release):
   {.pop.}
 
 
-proc newHttpServer*(onrequestcallback: proc(){.gcsafe, nimcall, raises: [].}, loglevel = Level.lvlWarn, parserequestline = true, contenttype = Compact, headerfields: openArray[string] = []): HttpServer =
+proc newHttpServer*(onrequestcallback: proc(){.gcsafe, nimcall, raises: [].}, loglevel = Level.lvlWarn, parserequestline = true, contenttype = Compact, headerfields: openArray[string] = [], maxPendingRequests = 0): HttpServer =
   ## Constructs a new http server. The essential thing here is to set the onrequestcallback proc.
   ## When it is triggered, the [http] thread-local socket context is accessible.
+  ##
+  ## When [maxPendingRequests] is greater than zero, the handler may call [replyPending] and return
+  ## before sending a response; the dispatcher will accept up to that many in-flight requests per server.
   ## 
   ## If you want to tinker with [HttpServer.maxheaderlength], [HttpServer.bufferlength] or [HttpServer.sockettimeoutms], that is best done
   ## after the server is constructed but before it is started.
   result = cast[HttpServer](allocShared0(sizeof(HttpServerObj)))
+  result.maxPendingRequests = maxPendingRequests
+  if maxPendingRequests > 0:
+    result.initPendingState()
   result.initHttpServer(loglevel, parserequestline, contenttype, headerfields)
   for field in result[].headerfields:
     for c in field:

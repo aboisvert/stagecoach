@@ -70,10 +70,12 @@ shutdownCallbacks.add(shutdownImpl)
 
 proc suspend(server: GuildenServer, sleepmillisecs: int) {.gcsafe, nimcall, raises: [].} =
   {.gcsafe.}:
-    discard workerdatas[server.id].activethreadcount.atomicdec()
+    if guildenDispatcherWorker:
+      discard workerdatas[server.id].activethreadcount.atomicdec()
     server.log(lvlAll, "suspending thread " & $getThreadId() & " for " & $sleepmillisecs & " millisecs") 
     sleep(sleepmillisecs)
-    discard workerdatas[server.id].activethreadcount.atomicinc()
+    if guildenDispatcherWorker:
+      discard workerdatas[server.id].activethreadcount.atomicinc()
 
 
 proc getSelectorForSocket(server: GuildenServer, socket: posix.SocketHandle): Selector[SocketData] =
@@ -114,6 +116,12 @@ proc restoreRead(server: GuildenServer, selector: Selector[SocketData], socketda
   socketdata.isprocessing.store(false)
 
 
+proc restoreDeferredSocket(server: GuildenServer, socket: SocketHandle, restoreContext: pointer) {.gcsafe, nimcall, raises: [].} =
+  {.gcsafe.}:
+    if restoreContext.isNil: return
+    restoreRead(server, workerdatas[server.id].gsselector, cast[SocketData](restoreContext))
+
+
 proc workerthreadLoop(server: GuildenServer) {.thread.} =
   {.gcsafe.}:
     initializeThread(server)
@@ -132,10 +140,22 @@ proc workerthreadLoop(server: GuildenServer) {.thread.} =
       if unlikely(shuttingdown): break
 
       server.log(lvlAll, "handling event at queue position " & $mytail)
-      handleRead(server, workerdatas[server.id].queue[mytail].socket, workerdatas[server.id].queue[mytail].customdata)
+      let socketdata = workerdatas[server.id].queue[mytail]
+      guildenDispatcherWorker = true
+      pendingRestoreContext = cast[pointer](socketdata)
+      acquirePendingSlot(server)
+      if unlikely(shuttingdown):
+        guildenDispatcherWorker = false
+        releasePendingSlot(server)
+        continue
+      handleRead(server, socketdata.socket, socketdata.customdata)
+      guildenDispatcherWorker = false
       server.log(lvlAll, "handled event at queue position " & $mytail)
-      
-      restoreRead(server, workerdatas[server.id].gsselector, workerdatas[server.id].queue[mytail])
+      if requestDeferred:
+        relinquishPendingSlotHold()
+      else:
+        restoreRead(server, workerdatas[server.id].gsselector, socketdata)
+        releasePendingSlot(server)
   if not isNil(server.threadFinalizerCallback): server.threadFinalizerCallback()
 
 
@@ -400,6 +420,7 @@ proc start*(server: GuildenServer, port: int, threadpoolsize: uint = 0, maxactiv
   server.closeSocketCallback = closeSocketImpl
   server.getFlagsCallback = getFlagsImpl
   server.setFlagsCallback = setFlagsImpl
+  server.restoreDeferredSocketCallback = restoreDeferredSocket
   createSelector(server)
   if server.port > 0: startListening(server)
   createThread(server.thread, startEventloop, server)

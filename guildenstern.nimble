@@ -24,5 +24,8 @@ task getandpost, "Compile and run examples/getandpost.nim":
 task httptest, "Compile and run examples/httptest.nim":
   compileAndRunExample("httptest")
 
+task asyncpending, "Compile and run examples/asyncpending.nim":
+  compileAndRunExample("asyncpending")
+
 task wsmulticasttest, "Compile and run examples/wsmulticasttest.nim":
   compileAndRunExample("wsmulticasttest", "-d:release --mm:atomicArc")

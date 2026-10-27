@@ -19,6 +19,34 @@ let
   zerocontent = "Content-Length: 0\c\L"
 
 
+proc replyPending*(): PendingReply {.gcsafe, raises: [].} =
+  ## Defer sending a response until [withPending] runs on another thread (or later on this one).
+  ## Copy request data you still need before returning from the handler.
+  doAssert(socketcontext.server.maxPendingRequests > 0)
+  requestDeferred = true
+  result = PendingReply(
+    server: socketcontext.server,
+    socket: thesocket,
+    restoreContext: pendingRestoreContext)
+  registerPendingReply(socketcontext.server, result)
+
+
+proc withPending*(pending: PendingReply, body: proc() {.gcsafe, raises: [].}) {.gcsafe, raises: [].} =
+  ## Run `body` with the deferred socket installed so [reply] works; then re-arm the connection.
+  if pending.isNil or pending.completed: return
+  let previous = socketcontext
+  if socketcontext.isNil:
+    socketcontext = SocketContext(server: pending.server, socket: pending.socket)
+  else:
+    socketcontext.server = pending.server
+    socketcontext.socket = pending.socket
+  try:
+    body()
+  finally:
+    completeDeferredRequest(pending)
+    socketcontext = previous
+
+
 proc replyFinish*(): SocketState {.discardable, inline, gcsafe, raises: [].} =
   # Informs that everything is replied.
   let ret =
