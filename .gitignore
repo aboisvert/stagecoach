@@ -1,12 +1,14 @@
-nim.cfg
 examples/nim.cfg
+config.nims
 bin/
 examples/wrkbin
 todo.md
 nimble.develop
 nimble.paths
 nimbledeps
-config.nims
+
+# Atlas checkouts. Restore with `atlas install` (follow #head) or `atlas rep` (atlas.lock).
+deps/
 docs.out
 *.idx
 nimdoc.out.css

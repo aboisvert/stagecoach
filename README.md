@@ -11,10 +11,18 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 ## Requirements
 
 - Nim ≥ 2.2.0
-- [stagelane](https://github.com/ghazalialshafi/stagelane) (see `stagecoach.nimble`; local path in [`config.nims`](config.nims))
+- [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas) (`stagecoach.nimble` pins `#head` for now)
 - Build with `--threads:on` (Nim default for your config)
 
 Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/flow`](stagecoach/flow.nim) in application code so `{.flow.}` works in your modules.
+
+## Dependencies
+
+```sh
+atlas install   # clones stagelane into deps/ and patches nim.cfg
+```
+
+Commit `nim.cfg` and `atlas.lock`. After a fresh clone, `atlas install` follows `#head`; use `atlas rep` to match the lockfile.
 
 ## Quick start
 
@@ -62,7 +70,7 @@ Load test (with helloworld on 8080): `./load-test.sh`
 
 - HTTP server on stagelane: M worker threads, connection and in-flight limits, `{.flow.}` handlers with explicit `HttpContext`
 - Removed: `dispatcher`, `epolldispatcher`, websocket and multipart servers, deferred `replyPending` / `asyncdispatch` pattern
-- Dependencies: stagelane; optional local checkout via `config.nims` `--path`
+- Dependencies: stagelane via Atlas (`atlas install`)
 
 ## Older notes (pre-stagelane)
 

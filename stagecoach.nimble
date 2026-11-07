@@ -9,7 +9,7 @@ binDir = "bin"
 bin = @["stagecoach"]
 
 requires "nim >= 2.2.0"
-requires "https://github.com/ghazalialshafi/stagelane"
+requires "https://github.com/ghazalialshafi/stagelane#head"
 
 proc compileAndRunExample(name: string, flags = "") =
   exec "nim c -r --hints:off --outdir:bin " & flags & " examples/" & name & ".nim"
