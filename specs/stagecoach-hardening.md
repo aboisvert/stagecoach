@@ -111,18 +111,18 @@ connection when a `Streaming` handler abandoned the body.
 
 ```callstack
  ok = connectionLoop(ctx) [[stagecoach/stagedispatcher.nim#connectionLoop]]
- └── while ctx.beginRequest() [[d999814:stagecoach/stagedispatcher.nim#beginRequest]]
-     ├── readHeader → processHeaders [[d999814:stagecoach/httprequest.nim#processHeaders]]
+ └── while ctx.beginRequest() [[d999814:stagecoach/stagedispatcher.nim#L92-L106]]
+     ├── readHeader → processHeaders [[d999814:stagecoach/httprequest.nim#L141-L168]]
 -    │   ├── parseHeaders: last duplicate wins, bare LF tolerated
 +    │   ├── parseHeaders: first wins, duplicates and bare LF rejected
 +    │   └── Connection: close wins over other tokens
-     ├── parseRequestLine [[d999814:stagecoach/httprequest.nim#parseRequestLine]]
+     ├── parseRequestLine [[d999814:stagecoach/httprequest.nim#L46-L57]]
 -    │   └── version followed by anything
 +    │   └── version followed by CR
-     ├── parseMethod [[d999814:stagecoach/httprequest.nim#parseMethod]]
+     ├── parseMethod [[d999814:stagecoach/httprequest.nim#L29-L43]]
 -    │   └── two-letter prefix list only
 +    │   └── full RFC 7230 token validation
-     └── ctx.endRequest() [[d999814:stagecoach/stagedispatcher.nim#endRequest]]
+     └── ctx.endRequest() [[d999814:stagecoach/stagedispatcher.nim#L109-L126]]
 -    └── keepAlive even when the Streaming body was abandoned
 +    └── Streaming body must be fully consumed for keep-alive
 ```
@@ -183,11 +183,11 @@ modules call it. The version check becomes one helper used by both
 builder. Behavior-preserving refactor; existing tests must pass unchanged.
 
 ```callstack
- ret = recvSome(ctx, buf, n) [[8e95b72:stagecoach/socketio.nim#recvSome]]
+ ret = recvSome(ctx, buf, n) [[8e95b72:stagecoach/socketio.nim#L69-L83]]
 -└── inline EINTR/EAGAIN retry + classifyRecv (same list, twice)
 +└── socketio.recvSome loop [[8e95b72:stagecoach/socketio.nim]]
 +    └── socketio.classifyRecv: one errno → (state, cause, msg) map
- ret = sendSome(ctx, data, len, flags) [[8e95b72:stagecoach/socketio.nim#sendSome]]
+ ret = sendSome(ctx, data, len, flags) [[8e95b72:stagecoach/socketio.nim#L84-L104]]
 -└── inline EINTR/EAGAIN retry
 +└── socketio.sendSome loop
 ```
@@ -255,7 +255,7 @@ global seq, and `serve` could run once ever.
 +  C --> D2[ThreadPool worker main waits drainms]
 +  D2 --> K[drain timer force-cancels conns scope]
 +  K --> J[wait: threads joined, runtime torn down, server reusable]
-   %% ref node:C [[b35490d:stagecoach/stagedispatcher.nim#acceptWatcher]]
+   %% ref node:C [[b35490d:stagecoach/stagedispatcher.nim#L105-L113]]
 ```
 
 ```changes
