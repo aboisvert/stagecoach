@@ -167,7 +167,7 @@ stagecoach/stagedispatcher.nim
 stagecoach/httpservercore.nim
 ```
 
-### Phase 3: One socket-IO home
+### ✅ Phase 3: One socket-IO home
 
 **Today**
 
@@ -183,17 +183,20 @@ modules call it. The version check becomes one helper used by both
 builder. Behavior-preserving refactor; existing tests must pass unchanged.
 
 ```callstack
- ret = recvSome(ctx, buf, n) [[stagecoach/httprequest.nim#recvSome]]
+ ret = recvSome(ctx, buf, n) [[8e95b72:stagecoach/socketio.nim#recvSome]]
 -└── inline EINTR/EAGAIN retry + classifyRecv (same list, twice)
-+└── socketio.recvAll loop [[stagecoach/socketio.nim]]
-+    └── socketio.classifyErrno: one errno → (state, cause, msg) map
- ret = sendSome(ctx, data, len, flags) [[stagecoach/httpresponse.nim#sendSome]]
++└── socketio.recvSome loop [[8e95b72:stagecoach/socketio.nim]]
++    └── socketio.classifyRecv: one errno → (state, cause, msg) map
+ ret = sendSome(ctx, data, len, flags) [[8e95b72:stagecoach/socketio.nim#sendSome]]
 -└── inline EINTR/EAGAIN retry
-+└── socketio.sendAll loop
++└── socketio.sendSome loop
 ```
 
 ```changes
-
+8e95b72
+stagecoach/socketio.nim
+stagecoach/httprequest.nim
+stagecoach/httpresponse.nim
 ```
 
 ### Phase 4: TCP_NODELAY back, default on
