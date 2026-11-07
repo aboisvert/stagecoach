@@ -395,4 +395,12 @@ stagecoach/stagedispatcher.nim
 ## Follow-ups (deferred)
 
 - Timer-allocation churn in `withSocketTimeout` (per-EAGAIN closure + timer):
-  measurement-gated; needs a benchmark harness that can show the delta.
+  **measured and closed**. Gate run with `query-bench.sh` (release build,
+  `hey -n 100000 -c 200` on localhost) twice per configuration:
+  timers on (production, `sockettimeoutms = 5000`) 131.7k / 136.8k req/s;
+  timers off entirely (`sockettimeoutms = 0`) 131.0k / 137.0k req/s — the
+  no-timer variant removes one closure alloc + one timer-wheel round trip
+  per blocking wait, and the difference is inside run-to-run variance.
+  The churn is not measurable under this load; the current implementation
+  stays. Re-gate if a future benchmark target changes (larger bodies, more
+  EAGAIN-heavy workloads).
