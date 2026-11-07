@@ -300,10 +300,87 @@ examples/httptest.nim
 README.md
 ```
 
+## ✅ Phase 7: Streaming bodies honor `requestTimeoutms`
+
+**Today (landed round)**
+
+`requestTimeoutms` bounds header receive and the `Compact` single-buffer
+receive loop, but the `Streaming` pump (`readBodyChunk`) only consults
+`sockettimeoutms` per wait. A client dribbling 1 byte every 4.9 s (under the
+5 s default) holds a streaming body open forever.
+
+**Proposed**
+
+Carry a per-request body clock in `ctx`:
+- `HttpContext` gains `bodyClock: MonoTime` + `bodyClockSet: bool`; reset per
+  request in `prepareHttpContext`.
+- The clock starts when the request framing became known — `readHeader` sets
+  it when body bytes arrived together with the header; `readBodyChunk`'s
+  socket-recv branch sets it lazily on the first body byte it pulls.
+- `readBodyChunk` checks `timedOut(server, ctx.bodyClock)` after each socket
+  recv that leaves the body incomplete; exceeding `requestTimeoutms` closes
+  with `TimedOut` ("request body too slow"). Handler-side processing between
+  chunks never counts: only socket receives advance the debt.
+- `receiveToSingleBuffer` (Compact) now uses the same per-request clock
+  instead of a call-local `t0`, so Compact bodies that partially arrive
+  during the header wait get the same accounting.
+
+New `tests/support_stream.nim` (Streaming server) + `tests/t_stream.nim`:
+a fast body succeeds; a dribbling body is cut at ~`requestTimeoutms` with the
+server surviving; a stalled body (faster than `sockettimeoutms`) is cut at
+~`sockettimeoutms`.
+
+```callstack
+ (st, chunk) = readBodyChunk(ctx, server) [[stagecoach/httprequest.nim#L316-L400]]
+ └── socket-recv branch on partial body
+-    └── recvSome: no total-time bound (sockettimeoutms only)
++    ├── ctx.bodyClock starts at first body byte (per-request field)
++    └── timedOut(server, ctx.bodyClock) → close TimedOut "request body too slow"
+```
+
+Landed in 2443e16: the body clock lives in `HttpContext`
+[[2443e16:stagecoach/httpservercore.nim#L79-L80]] (reset per request),
+`readHeader` starts it when body bytes accompany the header, and
+`receiveToSingleBuffer` [[2443e16:stagecoach/httprequest.nim#L303-L322]] and
+`readBodyChunk` [[2443e16:stagecoach/httprequest.nim#L324-L384]] share it —
+the total body *receive* time is the bound; handler time never counts.
+Streaming test server + 3 tests (fast / dribble / stall) landed as
+`tests/support_stream.nim` / `tests/t_stream.nim`. One test-harness lesson
+is baked into the test file: `std/net` send has no timeout parameter, so a
+blocking send on a server-reset connection can wedge the test client in the
+kernel (observed on macOS); the client socket is non-blocking + `trySend`.
+
+```changes
+2443e16
+stagecoach/httprequest.nim
+stagecoach/httpservercore.nim
+tests/support_stream.nim
+tests/t_stream.nim
+stagecoach.nimble
+```
+
+## Phase 8: Per-worker `HttpContext` pooling
+
+**Today (landed round)**
+
+`connectionLoop` builds a fresh `HttpContext` per accepted connection —
+a ~10 KB string, a `StringTableRef`, and a `wanted` seq — on every accept,
+though each worker's hot path uses few contexts over its lifetime.
+
+**Proposed**
+
+`Worker` gains `ctxPool: seq[HttpContext]` (cap = this worker's `connSem`
+permits). `connectionLoop` pops a pooled context (or builds one), and the
+`finally` pushes it back after the socket is closed. Contexts are never
+shared across workers; use is fully synchronous within one worker's event
+loop, so no atomics are needed. Existing suites must stay green; the
+benchmark run notes allocations before/after if `hey` is available.
+
+```changes
+
+```
+
 ## Follow-ups (deferred)
 
-- Per-worker `HttpContext` pooling (cuts the ~10 KB per-connection allocation).
-- Timer-allocation churn in `withSocketTimeout` (per-EAGAIN closure + timer).
-- Streaming-body timeout: `requestTimeoutms` still does not bound a dribbling
-  `Streaming` body — needs a clock carried across `readBodyChunk` calls; needs
-  a design decision before landing.
+- Timer-allocation churn in `withSocketTimeout` (per-EAGAIN closure + timer):
+  measurement-gated; needs a benchmark harness that can show the delta.
