@@ -49,6 +49,22 @@ type
     drainms*: int                       ## stop(): force-cancel connections after this window
 
   HttpContext* = ref object of RootObj
+    ## One accepted connection's state. Reused across pipelined requests on
+    ## the same connection. Field contract:
+    ## `request` holds one growable receive buffer; `requestlen` is the valid
+    ## byte count inside it. `uristart`/`urilen`/`methlen` point into
+    ## `request` for the current request line; `bodystart` is `request`-index 1
+    ## past the header block (-1 until a header terminator is seen).
+    ## `contentlength` is framed size of the body; `contentreceived` counts
+    ## body bytes pulled off the wire; `bodyDelivered` counts bytes handed to
+    ## the handler (Streaming workers advance one streamScratch chunk at a
+    ## time); for Compact bodies received fully by beginRequest, `getBody` and
+    ## `isBody` never advance `bodyDelivered`.
+    ## `carryLen`/`carryStart` fence the bytes of the NEXT pipelined request
+    ## baked into this buffer; prepareHttpContext moves them to offset 0.
+    ## `headers` holds lower-case wanted header values; `keepAlive`/`http10`
+    ## steer the loop; `streamScratch` is the Streaming copy-out chunk and
+    ## `sendBuf` is a reusable response buffer owned by the connection.
     server*: HttpServer
     socket*: SocketHandle
     request*: string

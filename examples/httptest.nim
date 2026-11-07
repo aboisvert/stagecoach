@@ -7,7 +7,7 @@ proc handleHttpRequest(ctx: HttpContext) {.flow.} =
   case ctx.getUri():
     of "/close":
       ctx.replyHeaders(Http204, [])
-      ctx.closeSocket()
+      ctx.closeHttpSocket()
     of "/stop":
       ctx.reply("stop")
       shutdown()

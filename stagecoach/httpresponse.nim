@@ -73,5 +73,5 @@ proc replyContinueChunked*(ctx: HttpContext, chunk: string): bool {.flow.} =
 proc replyFinishChunked*(ctx: HttpContext): bool {.flow.} =
   ctx.writeToSocket("0" & longdivider, lastSendFlags) != Fail
 
-proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
+proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.deprecated: "use closeHttpSocket".} =
   closeHttpSocket(ctx, cause, msg)

@@ -47,6 +47,17 @@ wait(server)                         # aliases: join(server, ...)
 
 Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
+Server knobs (set before `serve`): `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets so small/chunked replies are not delayed by Nagle; `sockettimeoutms` (default 5000) bounds any single read/write; `requestTimeoutms` (default 30000) bounds the total time to receive a header or Compact body.
+
+Per-server lifecycle: `stop(srv, drainms = 10_000)` stops that one server—
+stops accepting, lets connection tasks finish for `drainms` ms, then
+force-cancels leftovers (`drainms = 0` cancels immediately). `wait(srv)`
+joins the worker threads and frees the runtime; the same `HttpServer` can
+then `serve` again. `shutdown()` (SIGINT/SIGTERM path) is process-global and
+one-way. A `Streaming` handler must consume the body fully
+(`readBodyChunk` until it returns `Complete`) to keep the connection; an
+abandoned body closes it.
+
 ## Examples
 
 See [`examples/`](examples/):
@@ -65,9 +76,28 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 
 ## API overview
 
-- [`stagecoach/httpserver`](stagecoach/httpserver.nim) — `HttpContext`, `newHttpServer`, `serve` / `wait`, request helpers (`getUri`, `readBodyChunk`, …), `reply` / chunked replies
+- [`stagecoach/httpserver`](stagecoach/httpserver.nim) — `HttpContext`, `newHttpServer`, `serve` / `wait`, `stop`, request helpers (`getUri`, `readBodyChunk`, …), `reply` / chunked replies
+- [`stagecoach/socketio`](stagecoach/socketio.nim) — shared non-blocking recv/send retry loops, errno classification, socket-timeout wrapper
 - [`stagecoach/coachserver`](stagecoach/coachserver.nim) — logging, `shutdown()`, close causes
 - [`stagecoach/flow`](stagecoach/flow.nim) — stagelane `{.flow.}` support for your handlers
+
+## Release notes, 0.2 (hardening + lifecycle)
+
+- Request framing is stricter: duplicate wanted headers (a smuggling
+  primitive) are rejected, header lines must be CRLF-terminated, `close`
+  wins among `Connection` tokens, junk after the version is rejected, and
+  the HTTP method must be a full RFC 7230 token (extension methods like
+  `REPORT` parse; `GHOST`-style only-prefix matches are gone)
+- Streaming keep-alive requires a fully consumed body; abandoned bodies
+  close the connection instead of misparsing the tail as a request
+- New per-server `stop(drainms)` + restartable `serve`/`wait`; SIGINT/SIGTERM
+  behavior unchanged (process-global, immediate)
+- `stagecoach/socketio.nim` consolidates the non-blocking recv/send retry
+  loops and errno→close-cause mapping that used to live in httprequest and
+  httpresponse
+- `TCP_NODELAY` is set on accepted sockets (`nodelay = true` knob)
+- New close cause `Cancelled`; cancelled handlers no longer log as `TimedOut`
+- Lowercase header-field enforcement now raises at `newHttpServer` time
 
 ## Release notes, 0.1 (stagelane port)
 
