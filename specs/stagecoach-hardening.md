@@ -218,30 +218,31 @@ stagecoach/httpservercore.nim
 stagecoach/stagedispatcher.nim
 ```
 
-### Phase 5: Real per-server lifecycle (stop, drain, restart)
+### ✅ Phase 5: Real per-server lifecycle (stop, drain, restart)
 
-**Today**
+**Today (latest review address)**
 
-`shuttingdown` is a global atomic; `shutdown()` stops every server forever; no
-per-server `stop()`; nothing cancels in-flight handlers; `nextid` and the
-callback list are plain globals; `HttpRuntime` accumulates in a global seq.
+`shuttingdown` was a global atomic; `shutdown()` stopped every server and
+rejoined nothing per server; nothing cancelled in-flight handlers; `nextid`
+and the callback list were plain globals; `HttpRuntime` accumulated in a
+global seq, and `serve` could run once ever.
 
-**Proposed**
+**Proposed (landed in b35490d)**
 
-- `HttpRuntime` gains `stopping: Atomic[bool]`, per-worker `Scope` handles for
-  connection tasks, and drain bookkeeping (in-flight semaphore counts).
-- `srv.stop(drainms = 10_000)`: stop accepting (write shutdown pipe, cancel
-  accept watcher), cancel every idle connection scope, let in-flight handlers
-  run — or force-cancel after the drain window — then callers `wait(srv)`.
-- All request-path checks (`recv/send/classify`, accept loop) consult the
-  *own server's* stopping flag in addition to the process signal latch.
-- `setupRuntime` becomes restartable: it resets server/runtime state instead of
-  relying on one-way globals.
-- `shutdown()` (SIGINT/SIGTERM) calls `stop(drainms = 0)` on every registered
-  runtime — the registry is an atomic-count slot array so the signal handler
-  only reads immutable slots and writes pipe bytes.
-- New integration test `tests/t_stop.nim`: start server, call `stop`, join,
-  confirm the port is free, `serve` again on the same server.
+- `stop(srv, drainms = 10_000)`: sets the runtime's `stopping` flag and pokes
+  its stop pipes. The per-worker accept watcher cancels only the accept loop;
+  connection tasks (now owned by an explicit per-worker `conns` `Scope`, not
+  the structured `scope` template) keep finishing for the window and are
+  force-cancelled after `drainms` (0 = immediately) via a drain timer.
+- `wait()`/`join()` join threads, then tear the runtime down (pipe/listener
+  `fd`s, registry slot) so the same `HttpServer` runs again with a fresh
+  `serve` call.
+- Request paths check `serverIsStopping(server)`/`serverIsOpen` instead of
+  only the process latch.
+- SIGINT/SIGTERM keep immediate behavior (the runtime's `drainms` defaults
+  to 0 there); the process latch still prevents restart after a signal, since
+  `shuttingdown` remains one-way. New `tests/t_stop.nim` covers stop, port
+  release, and restart.
 
 ```mermaid diff [stop stops one server, shutdown stops all of them]
  flowchart LR
@@ -249,19 +250,21 @@ callback list are plain globals; `HttpRuntime` accumulates in a global seq.
 -  G --> W[poke every runtime's pipes]
 -  W --> A[accept loop cancelled]
 -  A -.->|in-flight handlers never cancelled| H[wait joins: latency = longest handler]
-+  SIG[signal] -->|shutdown| C[stop drainms=0 for each runtime]
-+  USER[server.stop] --> C2[stop this runtime only]
-+  C --> K[cancel idle connection scopes]
-+  C2 --> K
-+  K --> D{in-flight handlers}
-+  D -->|within drain window| D
-+  D -->|drain expired| K2[force-cancel scopes]
-+  K & K2 --> J[threads joined via wait]
-   %% ref node:A [[stagecoach/stagedispatcher.nim#shutdownAcceptWatcher]]
++  SIG[signal] -->|poke pipes| C[watcher cancels only acceptLoop]
++  USER[server.stop drainms] --> C
++  C --> D2[ThreadPool worker main waits drainms]
++  D2 --> K[drain timer force-cancels conns scope]
++  K --> J[wait: threads joined, runtime torn down, server reusable]
+   %% ref node:C [[b35490d:stagecoach/stagedispatcher.nim#acceptWatcher]]
 ```
 
 ```changes
-
+b35490d
+stagecoach/httpservercore.nim
+stagecoach/httprequest.nim
+stagecoach/stagedispatcher.nim
+tests/t_stop.nim
+stagecoach.nimble
 ```
 
 ### Phase 6: Small cleanups and written contracts
