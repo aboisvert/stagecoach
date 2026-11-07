@@ -359,7 +359,7 @@ tests/t_stream.nim
 stagecoach.nimble
 ```
 
-## Phase 8: Per-worker `HttpContext` pooling
+## ✅ Phase 8: Per-worker `HttpContext` pooling
 
 **Today (landed round)**
 
@@ -369,15 +369,27 @@ though each worker's hot path uses few contexts over its lifetime.
 
 **Proposed**
 
-`Worker` gains `ctxPool: seq[HttpContext]` (cap = this worker's `connSem`
-permits). `connectionLoop` pops a pooled context (or builds one), and the
-`finally` pushes it back after the socket is closed. Contexts are never
-shared across workers; use is fully synchronous within one worker's event
-loop, so no atomics are needed. Existing suites must stay green; the
-benchmark run notes allocations before/after if `hey` is available.
+`Worker` (passed by value into the `{.flow.}` procs) gains `pool: CtxPool` —
+a `ref` so both `connectionLoop` and the worker main see the same storage —
+with `ctxs: seq[HttpContext]` and `cap` = this worker's `connSem` permits.
+`connectionLoop` pops a pooled context (or builds one), sets only `socket`,
+and the `finally` pushes it back after the socket is closed (zeroing any
+half-consumed pipelined `carry*` state; all other state is reset per request
+by `prepareHttpContext`). Contexts are never shared across workers; use is
+fully synchronous within one worker's event loop, so no atomics are needed.
+Existing suites must stay green.
+
+Landed in 194394f: `CtxPool`/`Worker`
+[[194394f:stagecoach/stagedispatcher.nim#L27-L40]] with `cap` = the worker's
+connection permits, set in `newWorker`
+[[194394f:stagecoach/stagedispatcher.nim#L104-L112]]; the reuse happens in
+`connectionLoop` [[194394f:stagecoach/stagedispatcher.nim#L203-L237]] — pop
+and rebind `socket` on accept, zero `carry*` and push back in the `finally`.
+Same-server restart keeps working (the pool dies with its worker thread).
 
 ```changes
-
+194394f
+stagecoach/stagedispatcher.nim
 ```
 
 ## Follow-ups (deferred)
