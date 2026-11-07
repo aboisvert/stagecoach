@@ -267,7 +267,7 @@ tests/t_stop.nim
 stagecoach.nimble
 ```
 
-### Phase 6: Small cleanups and written contracts
+### ✅ Phase 6: Small cleanups and written contracts
 
 **Today**
 
@@ -280,14 +280,24 @@ the README documents limits but not the new knobs/io module/lifecycle.
 
 - Contract doc comments on the `HttpContext` fields (`requestlen`, `carry*`,
   `bodyDelivered` vs `contentreceived`, `streamScratch` reuse).
-- `httpresponse.closeSocket(ctx)` removed in favor of `closeHttpSocket` (one
-  package-level harder name with the server variant).
+- `closeSocket(ctx)` deprecated in favor of `closeHttpSocket` (the server/fd
+  variant keeps its name); the httptest example is updated.
 - Cast-width cleanup at parse boundaries where it is free.
-- README: document `nodelay`, `stop`/`drainms`, `gif` of the close causes, and
+- README: document `nodelay`, `stop`/`drainms`, the close causes, and
   the streaming-body keep-alive rule; note `Follow-ups` in the spec.
 
-```changes
+Landed in 7fe4fe0: written contracts on the `HttpContext` fields
+[[7fe4fe0:stagecoach/httpservercore.nim]], the ctx-level `closeSocket`
+deprecated in favor of `closeHttpSocket` [[7fe4fe0:stagecoach/httpresponse.nim]],
+the httptest example updated, and the README documents the knobs, lifecycle
+and 0.2 changes.
 
+```changes
+7fe4fe0
+stagecoach/httpservercore.nim
+stagecoach/httpresponse.nim
+examples/httptest.nim
+README.md
 ```
 
 ## Follow-ups (deferred)
