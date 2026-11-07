@@ -97,6 +97,11 @@ proc eqLower(buf: string, start, len: int, lowerName: string): bool {.inline.} =
 
 # --- request line -----------------------------------------------------------
 
+proc isTchar(c: char): bool {.inline.} =
+  ## RFC 7230 token character.
+  c in {'!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~'} or
+      c in {'0' .. '9'} or c.isAlphaAscii()
+
 proc parseMethod*(ctx: HttpContext): bool =
   if unlikely(ctx.requestlen < 13):
     ctx.closeHttpSocket(ProtocolViolated, "too short request")
@@ -106,15 +111,12 @@ proc parseMethod*(ctx: HttpContext): bool =
   if unlikely(ctx.methlen == ctx.requestlen):
     ctx.closeHttpSocket(ProtocolViolated, "http method missing")
     return false
-  const prefixes = ["GE", "PO", "HE", "PU", "DE", "CO", "OP", "TR", "PA"]
-  var ok = false
-  for p in prefixes:
-    if ctx.request[0] == p[0] and ctx.request[1] == p[1]:
-      ok = true
-      break
-  if unlikely(not ok):
-    ctx.closeHttpSocket(ProtocolViolated, "invalid http method")
-    return false
+  # The whole method must be a valid token: accepts standard and extension
+  # methods (REPORT, LOCK, QUERY, ...) and rejects non-token bytes.
+  for i in 0 ..< ctx.methlen.int:
+    if not ctx.request[i].isTchar():
+      ctx.closeHttpSocket(ProtocolViolated, "invalid http method")
+      return false
   true
 
 proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
@@ -130,7 +132,8 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
   if unlikely(ctx.requestlen < ver + 8):
     ctx.closeHttpSocket(ProtocolViolated, "parseRequestLine: no version")
     return false
-  if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.") or ctx.request[ver + 7] notin {'0', '1'}):
+  if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.") or ctx.request[ver + 7] notin {'0', '1'} or
+      ctx.request[ver + 8] != '\c'):
     ctx.closeHttpSocket(ProtocolViolated, "request not HTTP/1.x")
     return false
   ctx.http10 = ctx.request[ver + 7] == '0'
@@ -152,14 +155,26 @@ proc isHeaderreceived*(ctx: HttpContext, previouslen, currentlen: int): bool =
     inc i
   false
 
-proc parseHeaders*(ctx: HttpContext) =
+proc hasConnToken(value: string, token: string): bool {.inline.} =
+  ## True when a comma-separated Connection list contains `token`.
+  for t in value.split(','):
+    if strip(t, leading = true, trailing = true) == token:
+      return true
+  false
+
+proc parseHeaders*(ctx: HttpContext): bool =
   ## Line-based scan that stores only the header names in `ctx.wanted`.
-  ## Requires `ctx.bodystart` to be set (header block complete).
+  ## The first occurrence of a wanted header wins. Requires `ctx.bodystart`
+  ## to be set (header block complete).
+  ## Returns false and closes the socket when a header line is not
+  ## CRLF-terminated or when a wanted header name occurs more than once
+  ## (duplicate framing/identity headers are a request-smuggling primitive).
   let hdrEnd = ctx.bodystart - 2          # points at the blank line's CR
   var i = 0
   while i < hdrEnd and ctx.request[i] != '\l':   # skip the request line
     inc i
   inc i
+  var seen = 0                            # bitmask: wanted names already matched
   while i < hdrEnd:
     var eol = i
     while eol < hdrEnd and ctx.request[eol] != '\l':
@@ -167,6 +182,9 @@ proc parseHeaders*(ctx: HttpContext) =
     var lineEnd = eol
     if lineEnd > i and ctx.request[lineEnd - 1] == '\c':
       dec lineEnd
+    else:
+      ctx.closeHttpSocket(ProtocolViolated, "header line not CRLF-terminated")
+      return false
     var colon = i
     while colon < lineEnd and ctx.request[colon] != ':':
       inc colon
@@ -174,8 +192,14 @@ proc parseHeaders*(ctx: HttpContext) =
       var nameEnd = colon
       while nameEnd > i and ctx.request[nameEnd - 1] in {' ', '\t'}:
         dec nameEnd
-      for w in ctx.wanted:
+      for wi in 0 ..< ctx.wanted.len:
+        let w = ctx.wanted[wi]
         if eqLower(ctx.request, i, nameEnd - i, w):
+          let bit = 1 shl wi
+          if (seen and bit) != 0:
+            ctx.closeHttpSocket(ProtocolViolated, "duplicate header field: " & w)
+            return false
+          seen = seen or bit
           var vs = colon + 1
           while vs < lineEnd and ctx.request[vs] in {' ', '\t'}:
             inc vs
@@ -185,6 +209,7 @@ proc parseHeaders*(ctx: HttpContext) =
           ctx.headers[w] = ctx.request[vs ..< ve]
           break
     i = eol + 1
+  true
 
 proc requestLineIsHttp10(ctx: HttpContext): bool =
   var e = 0
@@ -195,7 +220,8 @@ proc requestLineIsHttp10(ctx: HttpContext): bool =
 proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
   ## Validates framing headers (Content-Length, Transfer-Encoding) and decides
   ## keep-alive. Closes the socket and returns false on a protocol violation.
-  ctx.parseHeaders()
+  if not ctx.parseHeaders():
+    return false
   if ctx.headers["transfer-encoding"].len > 0:
     ctx.closeHttpSocket(ProtocolViolated, "transfer-encoding not supported")
     return false
@@ -220,7 +246,11 @@ proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
   let http10 = ctx.requestLineIsHttp10()
   ctx.http10 = http10
   let conn = ctx.headers["connection"].toLowerAscii()
-  ctx.keepAlive = if http10: conn == "keep-alive" else: conn != "close"
+  # RFC 7230 §6.6: `close` wins over `keep-alive` when both tokens appear.
+  ctx.keepAlive = if http10:
+      hasConnToken(conn, "keep-alive") and not hasConnToken(conn, "close")
+    else:
+      not hasConnToken(conn, "close")
   true
 
 # --- accessors --------------------------------------------------------------

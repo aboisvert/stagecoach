@@ -112,6 +112,14 @@ proc endRequest*(ctx: HttpContext): bool =
   ## Post-handler bookkeeping: false means "stop serving this connection".
   if ctx.socket == INVALID_SOCKET or isShuttingDown() or not ctx.keepAlive:
     return false
+  # A partially consumed Streaming body leaves its unread tail in the socket:
+  # keep-alive here would misparse the tail as the next request. (Compact
+  # bodies are fully received by beginRequest, so `bodyDelivered` legitimately
+  # stays 0 for handlers that use `getBody`.)
+  let s = ctx.server
+  if s.contenttype == ContentType.Streaming and ctx.bodystart >= 0 and
+      ctx.bodyDelivered < ctx.contentlength:
+    return false
   ctx.recordCarry(ctx.server)
   true
 

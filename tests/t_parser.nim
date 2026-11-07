@@ -125,6 +125,72 @@ suite "HTTP parsing":
     check c.parseAll(s)
     check c.headers["origin"] == "http://x"
 
+  test "extension and non-prefixed methods are valid tokens":
+    for m in ["REPORT", "LOCK", "QUERY", "PAPAYA", "GHOST"]:
+      ctx.prepareHttpContext(server)
+      ctx.load m & " /x HTTP/1.1\c\L\c\L"
+      check ctx.parseAll(server)
+      check ctx.getMethod() == m
+
+  test "methods with non-token bytes are rejected":
+    ctx.load "PA{ /x HTTP/1.1\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "duplicate content-length rejected":
+    ctx.load "POST /x HTTP/1.1\c\LContent-Length: 3\c\LContent-Length: 4\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "duplicate wanted header rejected":
+    ctx.load "GET / HTTP/1.1\c\LConnection: close\c\LConnection: keep-alive\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "duplicate unwanted headers are harmless":
+    ctx.load "GET / HTTP/1.1\c\LHost: a\c\LHost: b\c\L\c\L"
+    check ctx.parseAll(server)
+    check ctx.contentlength == 0
+
+  test "bare LF header line rejected":
+    ctx.load "GET / HTTP/1.1\c\LHost: t\n\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "junk after version rejected":
+    ctx.load "GET / HTTP/1.1x\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "close token wins over keep-alive":
+    ctx.load "GET / HTTP/1.1\c\LConnection: keep-alive, close\c\L\c\L"
+    check ctx.parseAll(server)
+    check not ctx.keepAlive
+    ctx.prepareHttpContext(server)
+    ctx.load "GET / HTTP/1.1\c\LConnection: close, keep-alive\c\L\c\L"
+    check ctx.parseAll(server)
+    check not ctx.keepAlive
+    ctx.prepareHttpContext(server)
+    ctx.load "GET / HTTP/1.0\c\LConnection: keep-alive, close\c\L\c\L"
+    check ctx.parseAll(server)
+    check not ctx.keepAlive
+
+  test "endRequest requires a fully consumed streaming body":
+    let s = newHttpServer(loglevel = lvlError, contenttype = ContentType.Streaming)
+    let c = s.newHttpContext(INVALID_SOCKET)
+    c.load "POST /x HTTP/1.1\c\LContent-Length: 5\c\L\c\Labc"
+    check c.parseAll(s)
+    check c.bodystart >= 0 and c.contentlength == 5
+    c.socket = SocketHandle(1)        # pretend the connection is open
+    c.keepAlive = true
+    c.bodyDelivered = 3
+    check not c.endRequest()          # tail would corrupt the next request
+    c.bodyDelivered = 5
+    check c.endRequest()              # fully consumed: keep-alive is fine
+
+  test "endRequest keeps compact connections without readBodyChunk":
+    ctx.socket = SocketHandle(1)
+    ctx.keepAlive = true
+    ctx.load "POST /x HTTP/1.1\c\LContent-Length: 5\c\L\c\Lhello"
+    check ctx.parseAll(server)
+    check ctx.bodyDelivered == 0      # getBody() never advances it
+    check ctx.endRequest()
+
   test "serve rejects maxheaderlength > bufferlength":
     server.maxheaderlength = 200_000
     expect ValueError:
