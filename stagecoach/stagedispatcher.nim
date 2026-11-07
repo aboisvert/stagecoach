@@ -24,9 +24,17 @@ when defined(linux):
   const SO_REUSEPORT = 15
 
 type
+  CtxPool* = ref object
+    ## Per-worker reuse pool for `HttpContext` objects. Lives on exactly one
+    ## worker's event loop: pop on accept, push back in `connectionLoop`'s
+    ## finally, never shared across threads.
+    ctxs*: seq[HttpContext]
+    cap*: int
+
   Worker* = object
     connSem*: Semaphore
     inflight*: Semaphore
+    pool*: CtxPool
 
 var httpRuntimes {.global.}: seq[HttpRuntime]
 
@@ -95,9 +103,11 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
 
 proc newWorker*(rt: HttpRuntime, nThreads: int): Worker =
   let s = rt.httpServer
+  let permits = max(1, (s.maxConnections + nThreads - 1) div nThreads)
   Worker(
-    connSem: newSemaphore(max(1, (s.maxConnections + nThreads - 1) div nThreads)),
-    inflight: newSemaphore(max(1, (s.maxInflight + nThreads - 1) div nThreads)))
+    connSem: newSemaphore(permits),
+    inflight: newSemaphore(max(1, (s.maxInflight + nThreads - 1) div nThreads)),
+    pool: CtxPool(cap: permits))
 
 proc listenerFor*(rt: HttpRuntime, idx: int): TcpListener =
   if idx < rt.listeners.len: rt.listeners[idx] else: rt.sharedListener
@@ -191,7 +201,14 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
     let rt = setupRuntime(httpSrv, bindPort, nThreads, connLimit, inflightLimit)
 
     proc connectionLoop(clientFd: SocketHandle, w: Worker) {.flow.} =
-      let ctx = httpSrv.newHttpContext(clientFd)
+      var ctx: HttpContext
+      # Reuse: a pooled context keeps its buffers/wanted list for this server;
+      # beginRequest runs prepareHttpContext per request anyway.
+      if w.pool.ctxs.len > 0:
+        ctx = w.pool.ctxs.pop()
+        ctx.socket = clientFd
+      else:
+        ctx = httpSrv.newHttpContext(clientFd)
       if httpSrv.nodelay:
         setNoDelay(clientFd)
       try:
@@ -210,6 +227,10 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
       finally:
         release(w.connSem)
         ctx.closeHttpSocket(CloseCalled, "")
+        if w.pool.ctxs.len < w.pool.cap:
+          ctx.carryLen = 0        # half-consumed pipelined bytes die with the conn
+          ctx.carryStart = 0
+          w.pool.ctxs.add ctx
 
     proc acceptLoop(rt: HttpRuntime, workerIdx: int, w: Worker, conns: Scope) {.flow.} =
       let s = rt.httpServer
