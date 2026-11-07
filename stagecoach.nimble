@@ -28,3 +28,7 @@ task asynchandler, "Compile and run examples/asynchandler.nim":
 
 task querybench, "Compile and run examples/querybench.nim":
   compileAndRunExample("querybench")
+
+task test, "Run stagecoach tests":
+  exec "nim c -r --hints:off tests/t_parser.nim"
+  exec "nim c -r --hints:off tests/t_socket.nim"

@@ -1,7 +1,11 @@
 import std/[strutils, strformat, os]
 import stagelane/sched
-from coachserver import StagecoachServer, SocketCloseCause, shuttingdown, closeSocket
-from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK
+import stagelane/core
+import stagelane/transform
+import httpservercore
+from coachserver import SocketCloseCause, shuttingdown
+from httprequest import closeHttpSocket
+from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK, EPIPE, ECONNRESET
 import httpcore
 
 const lastSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT
@@ -18,31 +22,48 @@ let
   contentlen = "Content-Length: "
   zerocontent = "Content-Length: 0\c\L"
 
-proc classifySend(ret: int, server: StagecoachServer, ctx: HttpContext): SocketState =
-  if unlikely(shuttingdown): return Fail
-  if likely(ret > 0): return Progress
-  let lastError = osLastError().int
-  if lastError in [EAGAIN.int, EWOULDBLOCK.int]: return TryAgain
-  closeSocket(server, ctx.socket, NetErrored, osErrorMsg(OSErrorCode(lastError)))
+proc classifySend(ret: int, ctx: HttpContext): SocketState =
+  if unlikely(shuttingdown):
+    return Fail
+  if likely(ret > 0):
+    return Progress
+  let lastError = osLastError()
+  if lastError.int in [EAGAIN.int, EWOULDBLOCK.int]:
+    return TryAgain
+  closeHttpSocket(ctx, NetErrored, osErrorMsg(lastError))
   Fail
 
+proc waitSocketWritable*(ctx: HttpContext) {.flow.} =
+  let server = ctx.server
+  if server.sockettimeoutms <= 0:
+    waitWritable(int(ctx.socket))
+    return
+  let self = curTask()
+  let timer = addTimer(server.sockettimeoutms, proc () = cancel(self))
+  try:
+    waitWritable(int(ctx.socket))
+  finally:
+    cancel(timer)
+
 proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): SocketState {.flow.} =
-  if length == 0: return Complete
+  if length == 0:
+    return Complete
   var sent = 0
   while sent < length:
     let ret = send(ctx.socket, cast[pointer](cast[int](data) + sent), (length - sent).cint, flags)
     if ret > 0:
       sent += ret
       continue
-    let state = classifySend(ret, ctx.server, ctx)
+    let state = classifySend(ret, ctx)
     if state == TryAgain:
-      waitWritable(int(ctx.socket))
+      ctx.waitSocketWritable()
     else:
       return state
   Complete
 
 proc writeToSocket*(ctx: HttpContext, text: string, length: int, flags: cint): SocketState {.flow.} =
-  if length == 0: return Complete
+  if length == 0:
+    return Complete
   result = ctx.sendSome(unsafeAddr text[0], length, flags)
   if result == Complete:
     ctx.server.log(lvlDebug, "writeToSocket " & $ctx.socket & ": " & text[0 ..< length])
@@ -83,14 +104,17 @@ proc replyStartChunked*(ctx: HttpContext, code: HttpCode = Http200, headers: ope
 
 proc replyContinueChunked*(ctx: HttpContext, chunk: string): bool {.flow.} =
   let delimiter = fmt"{chunk.len:X}" & shortdivider
-  if ctx.writeToSocket(delimiter, delimiter.len, moreSendFlags) == Fail: return false
-  if ctx.writeToSocket(chunk, chunk.len, moreSendFlags) == Fail: return false
+  if ctx.writeToSocket(delimiter, delimiter.len, moreSendFlags) == Fail:
+    return false
+  if ctx.writeToSocket(chunk, chunk.len, moreSendFlags) == Fail:
+    return false
   ctx.writeToSocket(shortdivider, shortdivider.len, moreSendFlags) != Fail
 
 proc replyFinishChunked*(ctx: HttpContext): bool {.flow.} =
   let delimiter = "0" & longdivider
-  if ctx.writeToSocket(delimiter, delimiter.len, lastSendFlags) == Fail: return false
+  if ctx.writeToSocket(delimiter, delimiter.len, lastSendFlags) == Fail:
+    return false
   ctx.replyFinish() != Fail
 
 proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
-  closeSocket(ctx.server, ctx.socket, cause, msg)
+  closeHttpSocket(ctx, cause, msg)

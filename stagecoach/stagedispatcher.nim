@@ -1,5 +1,5 @@
 import std/[posix, os, nativesockets, net, osproc, logging]
-from std/posix import recv, close, MSG_PEEK
+from std/posix import recv, close, MSG_PEEK, EAGAIN, EWOULDBLOCK
 import stagelane/sched
 import stagelane/net
 import stagelane/sync
@@ -56,7 +56,6 @@ const defaultConnLimit = 1024
 const defaultInflightLimit = 64
 
 proc storeOsThreadCount(s: HttpServer, n: int) =
-  # Outside the serve template so the field name is not substituted.
   s.osThreads = n
 
 template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
@@ -95,6 +94,14 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
     httpSrv.started = true
     httpSrv.log(lvlInfo, "listening on port " & $bindPort & " with " & $nThreads & " OS threads")
 
+    proc shutdownAcceptWatcher(shutdownRfd: cint, victim: typeof(curTask())) {.flow.} =
+      while not shuttingdown:
+        waitReadable(shutdownRfd)
+        var dummy: array[16, char]
+        discard posix.read(shutdownRfd, addr dummy[0], 16)
+        break
+      cancel(victim)
+
     proc connectionLoop(clientFd: SocketHandle, connSem, inflight: Semaphore) {.flow.} =
       let s = httpSrv
       let ctx = s.newHttpContext(clientFd)
@@ -108,35 +115,40 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
             if s.parserequestline and not ctx.parseRequestLine(s):
               break
             case s.contenttype
-            of NoBody:
+            of ContentType.NoBody:
               discard
-            of Compact:
-              if ctx.contentlength > s.bufferlength:
-                closeSocket(s, ctx.socket, ProtocolViolated, "content-length too large")
+            of ContentType.Compact:
+              let bufCap = s.bufferlength + 1
+              if ctx.contentlength > 0 and ctx.bodystart + ctx.contentlength > bufCap:
+                ctx.closeHttpSocket(ProtocolViolated, "content-length too large")
                 break
               if not ctx.receiveToSingleBuffer(s):
                 break
-            of Streaming:
+            of ContentType.Streaming:
               discard
             handler(ctx)
           finally:
             release(inflight)
-          if shuttingdown: break
+          if shuttingdown:
+            break
+          ctx.recordCarry(s)
+          if ctx.carryLen > 0:
+            continue
           var probe = [0.char]
           let r = recv(ctx.socket, addr probe[0], 1, MSG_PEEK or MSG_DONTWAIT)
           if r <= 0:
-            let e = osLastError().int
-            if r == 0 or e notin [EAGAIN.int, EWOULDBLOCK.int]:
+            let e = osLastError()
+            if r == 0 or e.int notin [EAGAIN.int, EWOULDBLOCK.int]:
               break
-            waitReadable(int(ctx.socket))
+            ctx.waitSocketReadable()
       except CancelledError:
-        closeSocket(s, ctx.socket, TimedOut, "cancelled")
+        ctx.closeHttpSocket(TimedOut, "cancelled")
       except CatchableError as ex:
-        closeSocket(s, ctx.socket, Excepted, ex.msg)
+        ctx.closeHttpSocket(Excepted, ex.msg)
       finally:
         release(connSem)
         if ctx.socket != INVALID_SOCKET:
-          discard posix.close(ctx.socket)
+          ctx.closeHttpSocket(CloseCalled, "")
 
     proc workerAcceptLoop(runtime: HttpRuntime, workerIdx: int) {.flow.} =
       let s = runtime.httpServer
@@ -150,12 +162,10 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         else:
           runtime.sharedListener
       let shutdownRfd = runtime.shutdownPipes[workerIdx][1]
+      let acceptLoop = curTask()
+      discard go shutdownAcceptWatcher(shutdownRfd, acceptLoop)
       scope conns:
         while not shuttingdown:
-          if shutdownRfd >= 0:
-            var dummy: array[16, char]
-            if posix.read(shutdownRfd, addr dummy[0], 16) > 0:
-              break
           acquire(connSem)
           try:
             let stream = listener.accept()

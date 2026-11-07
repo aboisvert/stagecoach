@@ -1,4 +1,4 @@
-const StagecoachVersion* = "9.0.3"
+const StagecoachVersion* = "0.1"
 
 import std/logging
 from std/posix import SocketHandle, INVALID_SOCKET, SIGINT, SIGTERM, onSignal, `==`, close
@@ -36,7 +36,7 @@ type
     started*: bool
     onCloseSocketCallback*: OnCloseSocketCallback
 
-  StagecoachServer* = ptr StagecoachServerObj
+  StagecoachServer* = ref StagecoachServerObj
 
 var
   shuttingdown* = false
@@ -56,11 +56,11 @@ onSignal(SIGTERM): shutdown()
 onSignal(SIGINT): shutdown()
 {.hint[XDeclaredButNotUsed]: on.}
 
-template log*(theserver: StagecoachServer, level: Level, message: string) =
+template log*(theserver: StagecoachServer, level: Level, message: untyped) =
   if unlikely(int(level) >= int(theserver.loglevel)):
     if likely(not isNil(theserver.logCallback)):
       var s = theserver.name & "-" & $getThreadId()
-      theserver.logCallback(level, s, message)
+      theserver.logCallback(level, s, $message)
 
 template log*(theserver: StagecoachServer, level: Level, source: string, message: string) =
   if unlikely(int(level) >= int(theserver.loglevel)):

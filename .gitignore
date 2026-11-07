@@ -12,3 +12,6 @@ deps/
 docs.out
 *.idx
 nimdoc.out.css
+
+tests/**/*
+!tests/**/*.*
