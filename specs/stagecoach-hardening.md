@@ -199,7 +199,7 @@ stagecoach/httprequest.nim
 stagecoach/httpresponse.nim
 ```
 
-### Phase 4: TCP_NODELAY back, default on
+### ✅ Phase 4: TCP_NODELAY back, default on
 
 **Today**
 
@@ -213,7 +213,9 @@ the Nagle↔delayed-ACK interaction.
 enabled. A knob, not a hard constant, so it can be toggled in benchmarks.
 
 ```changes
-
+b53b3ee
+stagecoach/httpservercore.nim
+stagecoach/stagedispatcher.nim
 ```
 
 ### Phase 5: Real per-server lifecycle (stop, drain, restart)
