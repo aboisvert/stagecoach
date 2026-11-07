@@ -92,7 +92,8 @@ proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
   for field in result.headerfields:
     for c in field:
       if c != '-' and not c.isLowerAscii():
-        result.log(lvlError, "Header field not in lower case: " & field)
+        raise newException(ValueError,
+          "Header field not in lower case (case-insensitive matching would never see it): " & field)
 
 proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result = HttpContext(server: server, socket: socket, bodystart: -1, keepAlive: true)

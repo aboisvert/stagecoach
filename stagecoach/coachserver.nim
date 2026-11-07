@@ -15,6 +15,7 @@ type
     EFault = -10000
     Excepted = -1000
     CloseCalled
+    Cancelled
     AlreadyClosed
     ClosedbyClient
     ConnectionLost
@@ -40,7 +41,7 @@ type
 
 var
   shuttingdown*: Atomic[bool]
-  nextid: int
+  nextid: Atomic[int]
   shutdownCallbacks* {.global.}: seq[proc() {.nimcall, raises: [].}]
 
 proc isShuttingDown*(): bool {.inline.} = shuttingdown.load(moRelaxed)
@@ -70,8 +71,7 @@ template log*(theserver: StagecoachServer, level: Level, source: string, message
       theserver.logCallback(level, source, message)
 
 proc initialize*(server: StagecoachServer, loglevel: Level) =
-  server.id = nextid
-  nextid += 1
+  server.id = nextid.fetchAdd(1, moRelaxed)
   server.loglevel = loglevel
   if isNil(server.logCallback):
     server.logCallback = proc(level: Level, source: string, message: string) {.nimcall.} =
@@ -85,7 +85,7 @@ proc initialize*(server: StagecoachServer, loglevel: Level) =
 
 proc logClose*(server: StagecoachServer, socket: SocketHandle, cause = CloseCalled, msg: string) =
   let level =
-    if cause in [CloseCalled, AlreadyClosed, ClosedbyClient]: lvlDebug
+    if cause in [CloseCalled, Cancelled, AlreadyClosed, ClosedbyClient]: lvlDebug
     elif cause in [ConnectionLost, TimedOut]: lvlInfo
     elif cause in [ProtocolViolated, NetErrored]: lvlNotice
     elif cause == SecurityThreatened: lvlWarn

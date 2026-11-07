@@ -87,11 +87,10 @@ proc listenerFor*(rt: HttpRuntime, idx: int): TcpListener =
   if idx < rt.listeners.len: rt.listeners[idx] else: rt.sharedListener
 
 proc shutdownAcceptWatcher*(shutdownRfd: cint, victim: typeof(curTask())) {.flow.} =
-  while not isShuttingDown():
-    waitReadable(shutdownRfd)
+  if not isShuttingDown():
+    waitReadable(shutdownRfd)             # wakes on a poke, cancel, or hang-up
     var dummy: array[16, char]
     discard posix.read(shutdownRfd, addr dummy[0], 16)
-    break
   cancel(victim)
 
 proc beginRequest*(ctx: HttpContext): bool {.flow.} =
@@ -147,7 +146,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           if not ctx.endRequest():
             break
       except CancelledError:
-        ctx.closeHttpSocket(TimedOut, "cancelled")
+        ctx.closeHttpSocket(Cancelled, "cancelled")
       except CatchableError as ex:
         ctx.closeHttpSocket(Excepted, ex.msg)
       finally:
