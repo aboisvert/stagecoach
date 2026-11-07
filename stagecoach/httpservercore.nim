@@ -25,6 +25,7 @@ type
     requestTimeoutms*: int     ## max time to receive a full header/body once started (<= 0: none)
     parserequestline*: bool
     headerfields*: seq[string]
+    nodelay*: bool             ## set TCP_NODELAY on accepted sockets (default true)
     osThreads*: int
     maxConnections*: int
     maxInflight*: int
@@ -80,6 +81,7 @@ proc initHttpServer*(s: HttpServer, loglevel: Level, parserequestline: bool,
   s.contenttype = contenttype
   s.parserequestline = parserequestline
   s.headerfields = @headerfields
+  s.nodelay = true
   s.osThreads = 0
   s.maxConnections = 0
   s.maxInflight = 0

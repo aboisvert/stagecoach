@@ -42,6 +42,12 @@ proc makeListener(port: int): TcpListener =
   else:
     listenTcp(port)
 
+proc setNoDelay(fd: SocketHandle) =
+  ## Disable Nagle so chunked/small replies are not held back on platforms
+  ## without MSG_MORE (e.g. macOS) by the delayed-ACK interaction.
+  var one: cint = 1
+  discard posix.setsockopt(fd, posix.IPPROTO_TCP, posix.TCP_NODELAY, addr one, SockLen(sizeof(one)))
+
 proc pokeAllShutdownPipes() {.nimcall, raises: [].} =
   {.cast(gcsafe).}:
     for rt in httpRuntimes:
@@ -136,6 +142,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
 
     proc connectionLoop(clientFd: SocketHandle, w: Worker) {.flow.} =
       let ctx = httpSrv.newHttpContext(clientFd)
+      if httpSrv.nodelay:
+        setNoDelay(clientFd)
       try:
         while ctx.beginRequest():
           acquire(w.inflight)
