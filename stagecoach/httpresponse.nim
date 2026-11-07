@@ -1,10 +1,9 @@
-import std/[strutils, os]
+import std/strutils
 import stagelane/core
 import stagelane/transform
 import httpservercore
-from coachserver import SocketCloseCause, isShuttingDown
-from httprequest import closeHttpSocket, waitSocketWritableImpl
-from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK, EINTR
+import socketio
+from posix import MSG_NOSIGNAL
 import httpcore
 
 const lastSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT
@@ -18,29 +17,6 @@ const
   longdivider = "\c\L\c\L"
   contentlen = "Content-Length: "
   zerocontent = "Content-Length: 0\c\L"
-
-proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): SocketState {.flow.} =
-  ## Sends exactly `length` bytes (waiting for writability as needed).
-  ## Closes the socket and returns Fail on error.
-  var sent = 0
-  while sent < length:
-    if isShuttingDown():
-      return Fail
-    let ret = send(ctx.socket, cast[pointer](cast[int](data) + sent), (length - sent).cint, flags)
-    if ret > 0:
-      sent += ret
-      continue
-    if ret < 0:
-      let e = osLastError()
-      if e.int == EINTR.int:
-        continue
-      if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
-        ctx.waitSocketWritableImpl()
-        continue
-      closeHttpSocket(ctx, NetErrored, osErrorMsg(e))
-      return Fail
-    ctx.waitSocketWritableImpl()   # send() returned 0: treat as would-block
-  Complete
 
 proc writeToSocket*(ctx: HttpContext, text: string, flags: cint): SocketState {.flow.} =
   if text.len == 0:

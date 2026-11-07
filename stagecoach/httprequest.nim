@@ -1,87 +1,11 @@
-import std/[strutils, os, strtabs, monotimes, times]
-import std/posix as posix
-from std/posix import recv, EAGAIN, EWOULDBLOCK, EINTR
+import std/[strutils, strtabs, monotimes, times]
 import std/logging
-import stagelane/sched
 import stagelane/core
 import stagelane/transform
 import httpservercore
-from coachserver import SocketCloseCause, isShuttingDown, closeSocket
-
-proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
-  let fd = ctx.socket
-  if fd == INVALID_SOCKET:
-    return
-  ctx.socket = INVALID_SOCKET
-  closeSocket(ctx.server, fd, cause, msg)
-
-# --- socket helpers ---------------------------------------------------------
-
-proc classifyRecv*(ret: int, cause: var SocketCloseCause, msg: var string): SocketState =
-  ## Pure classification of a `recv` result; the caller decides whether to close.
-  if unlikely(isShuttingDown()):
-    cause = CloseCalled
-    msg = "shutting down"
-    return Fail
-  if likely(ret > 0):
-    return Progress
-  if unlikely(ret == 0):
-    cause = ClosedbyClient
-    msg = "peer closed"
-    return Fail
-  let lastError = osLastError().int
-  if lastError in [EAGAIN.int, EWOULDBLOCK.int, EINTR.int]:
-    return TryAgain
-  cause = NetErrored
-  if lastError == posix.EBADF.int: cause = AlreadyClosed
-  elif lastError == posix.EFAULT.int: cause = EFault
-  elif lastError == posix.EPIPE.int: cause = ConnectionLost
-  elif lastError == posix.ECONNRESET.int: cause = ClosedbyClient
-  msg = osErrorMsg(OSErrorCode(lastError))
-  Fail
-
-proc checkRecv*(ctx: HttpContext, ret: int): SocketState =
-  ## `classifyRecv`, closing the socket on failure.
-  var cause = CloseCalled
-  var msg = ""
-  result = classifyRecv(ret, cause, msg)
-  if result == Fail:
-    closeHttpSocket(ctx, cause, msg)
-
-template withSocketTimeout(ctx: HttpContext, waitCall: untyped) =
-  let ms = ctx.server.sockettimeoutms
-  if ms <= 0:
-    waitCall
-  else:
-    let self = curTask()
-    let timer = addTimer(ms, proc () = cancel(self))
-    try:
-      waitCall
-    finally:
-      cancel(timer)
-
-proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
-  ctx.withSocketTimeout(waitReadable(int(ctx.socket)))
-
-proc waitSocketWritableImpl*(ctx: HttpContext) {.flow.} =
-  ctx.withSocketTimeout(waitWritable(int(ctx.socket)))
-
-proc waitSocketWritable*(ctx: HttpContext) {.flow.} = ctx.waitSocketWritableImpl()
-
-proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
-  ## Reads up to `n` bytes, waiting while the socket would block.
-  ## Returns 0 on EOF and < 0 on a real error.
-  while true:
-    let r = recv(ctx.socket, buf, n.cint, MSG_DONTWAIT)
-    if r >= 0:
-      return r
-    let e = osLastError().int
-    if e == EINTR.int:
-      continue
-    if e in [EAGAIN.int, EWOULDBLOCK.int]:
-      ctx.waitSocketReadable()
-    else:
-      return r
+import socketio
+from coachserver import SocketCloseCause, isShuttingDown
+export socketio
 
 # --- byte helpers -----------------------------------------------------------
 
