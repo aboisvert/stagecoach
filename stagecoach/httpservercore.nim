@@ -1,6 +1,6 @@
 ## Shared HTTP server types and constants (no request/response I/O).
 
-import std/[strtabs, logging, strutils, atomics]
+import std/[strtabs, logging, strutils, atomics, monotimes]
 import stagelane/net
 import coachserver
 export coachserver
@@ -76,6 +76,8 @@ type
     contentlength*: int64
     contentreceived*: int64
     bodyDelivered*: int64
+    bodyClock*: MonoTime       ## start of the current body-receive window
+    bodyClockSet*: bool
     carryLen*: int64
     carryStart*: int64
     headers*: StringTableRef

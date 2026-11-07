@@ -233,6 +233,7 @@ proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
   ctx.bodystart = -1
   ctx.contentreceived = 0
   ctx.bodyDelivered = 0
+  ctx.bodyClockSet = false
   ctx.keepAlive = true
   ctx.http10 = false
   for key in ctx.wanted:
@@ -288,6 +289,11 @@ proc readHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   ctx.contentreceived = ctx.requestlen - ctx.bodystart
   if not ctx.processHeaders(server):
     return false
+  # Body bytes already on the wire when framing became known start the
+  # per-request body-receive clock (see readBodyChunk/receiveToSingleBuffer).
+  if ctx.contentreceived > 0:
+    ctx.bodyClock = getMonoTime()
+    ctx.bodyClockSet = true
   if server.contenttype == ContentType.Compact:
     let cap = ctx.bodystart + ctx.contentlength + 1
     if ctx.request.len < cap:
@@ -297,7 +303,9 @@ proc readHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
 proc receiveToSingleBuffer*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   if ctx.contentreceived >= ctx.contentlength:
     return true
-  let t0 = getMonoTime()
+  if not ctx.bodyClockSet:
+    ctx.bodyClock = getMonoTime()
+    ctx.bodyClockSet = true
   while ctx.contentreceived < ctx.contentlength:
     if not serverIsOpen(server):
       return false
@@ -308,7 +316,7 @@ proc receiveToSingleBuffer*(ctx: HttpContext, server: HttpServer): bool {.flow.}
       return false
     ctx.contentreceived += ret
     ctx.requestlen = ctx.bodystart + ctx.contentreceived
-    if ctx.contentreceived < ctx.contentlength and timedOut(server, t0):
+    if ctx.contentreceived < ctx.contentlength and timedOut(server, ctx.bodyClock):
       ctx.closeHttpSocket(TimedOut, "request body too slow")
       return false
   true
@@ -331,6 +339,9 @@ proc readBodyChunk*(ctx: HttpContext, server: HttpServer): (SocketState, string)
     return (Fail, "")
   if ctx.streamScratch.len == 0:
     ctx.streamScratch = newString(server.bufferlength.int)
+  if not ctx.bodyClockSet:
+    ctx.bodyClock = getMonoTime()
+    ctx.bodyClockSet = true
   let need = ctx.contentlength - ctx.contentreceived
   let recvsize = min(need, ctx.streamScratch.len.int64).int
   let ret = ctx.recvSome(addr ctx.streamScratch[0], recvsize)
@@ -341,4 +352,9 @@ proc readBodyChunk*(ctx: HttpContext, server: HttpServer): (SocketState, string)
   let chunk = ctx.streamScratch[0 ..< ret]
   if ctx.contentreceived >= ctx.contentlength:
     return (Complete, chunk)
+  # A dribbling client (1 byte just under sockettimeoutms apart) would never
+  # trip the per-op waits: the total body-receive time is the bound here.
+  if timedOut(server, ctx.bodyClock):
+    ctx.closeHttpSocket(TimedOut, "request body too slow")
+    return (Fail, "")
   (Progress, chunk)
