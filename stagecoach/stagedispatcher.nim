@@ -1,25 +1,24 @@
-import std/[posix, os, nativesockets, net, osproc, logging]
-from std/posix import recv, close, MSG_PEEK, EAGAIN, EWOULDBLOCK
+## Runtime plumbing for `serve`: listeners, shutdown pipes, per-request steps.
+## Only the handler-dependent glue lives in the `serve` template (flow procs
+## need a static call to the handler).
+
+import std/[posix, os, nativesockets, osproc, logging]
+import stagelane/core
 import stagelane/sched
 import stagelane/net
 import stagelane/sync
 import stagelane/transform
+import httpservercore, httprequest
+from coachserver import shutdownCallbacks, isShuttingDown, log
+export httpservercore
 
 when defined(linux):
   const SO_REUSEPORT = 15
 
 type
-  HttpRuntime = ref object
-    httpServer: HttpServer
-    threads: seq[Thread[WorkerIdx]]
-    shutdownPipes: seq[(cint, cint)]
-    listeners: seq[TcpListener]
-    sharedListener: TcpListener
-    useReusePort: bool
-
-  WorkerIdx = object
-    runtime: HttpRuntime
-    idx: int
+  Worker* = object
+    connSem*: Semaphore
+    inflight*: Semaphore
 
 var httpRuntimes {.global.}: seq[HttpRuntime]
 
@@ -40,7 +39,8 @@ proc makeListener(port: int): TcpListener =
       raiseOSError(osLastError())
     fd.setBlocking(false)
     return TcpListener(fd: fd)
-  listenTcp(port)
+  else:
+    listenTcp(port)
 
 proc pokeAllShutdownPipes() {.nimcall, raises: [].} =
   {.cast(gcsafe).}:
@@ -49,130 +49,124 @@ proc pokeAllShutdownPipes() {.nimcall, raises: [].} =
         var b: array[1, char] = ['x']
         discard write(wfd, addr b[0], 1)
 
-proc registerShutdownPipes() {.nimcall.} = pokeAllShutdownPipes()
-system.add(shutdownCallbacks, registerShutdownPipes)
+system.add(shutdownCallbacks, pokeAllShutdownPipes)
 
-const defaultConnLimit = 1024
-const defaultInflightLimit = 64
+const defaultConnLimit* = 1024
+const defaultInflightLimit* = 64
 
-proc storeOsThreadCount(s: HttpServer, n: int) =
-  s.osThreads = n
+proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: int): HttpRuntime =
+  if srv.maxheaderlength > srv.bufferlength:
+    raise newException(ValueError, "maxheaderlength must not exceed bufferlength")
+  srv.osThreads = nThreads
+  srv.maxConnections = connLimit
+  srv.maxInflight = inflightLimit
+  srv.port = uint16(port)
+  result = HttpRuntime(httpServer: srv)
+  for i in 0 ..< nThreads:
+    when defined(linux):
+      result.listeners.add makeListener(port)
+    else:
+      if i == 0: result.sharedListener = listenTcp(port)
+    var fds: array[2, cint]
+    if pipe(fds) != 0:
+      raiseOSError(osLastError())
+    discard fcntl(fds[0], F_SETFL, O_NONBLOCK)
+    result.shutdownPipes.add (fds[1], fds[0])
+  httpRuntimes.add result
+  srv.runtime = result
+  srv.started = true
+  srv.log(lvlInfo, "listening on port " & $port & " with " & $nThreads & " OS threads")
+
+proc newWorker*(rt: HttpRuntime, nThreads: int): Worker =
+  let s = rt.httpServer
+  Worker(
+    connSem: newSemaphore(max(1, (s.maxConnections + nThreads - 1) div nThreads)),
+    inflight: newSemaphore(max(1, (s.maxInflight + nThreads - 1) div nThreads)))
+
+proc listenerFor*(rt: HttpRuntime, idx: int): TcpListener =
+  if idx < rt.listeners.len: rt.listeners[idx] else: rt.sharedListener
+
+proc shutdownAcceptWatcher*(shutdownRfd: cint, victim: typeof(curTask())) {.flow.} =
+  while not isShuttingDown():
+    waitReadable(shutdownRfd)
+    var dummy: array[16, char]
+    discard posix.read(shutdownRfd, addr dummy[0], 16)
+    break
+  cancel(victim)
+
+proc beginRequest*(ctx: HttpContext): bool {.flow.} =
+  ## Reads and validates one request (header, request line, Compact body).
+  ## Returns false when the connection should be dropped (socket already closed
+  ## if that was due to an error).
+  let s = ctx.server
+  ctx.prepareHttpContext(s)
+  if not ctx.readHeader(s):
+    return false
+  if s.parserequestline and not ctx.parseRequestLine(s):
+    return false
+  if s.contenttype == ContentType.Compact and not ctx.receiveToSingleBuffer(s):
+    return false
+  true
+
+proc endRequest*(ctx: HttpContext): bool =
+  ## Post-handler bookkeeping: false means "stop serving this connection".
+  if ctx.socket == INVALID_SOCKET or isShuttingDown() or not ctx.keepAlive:
+    return false
+  ctx.recordCarry(ctx.server)
+  true
+
+proc joinRuntime*(srv: HttpServer) =
+  let rt = srv.runtime
+  if not rt.isNil:
+    for i in 0 ..< rt.threads.len:
+      joinThread(rt.threads[i])
 
 template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
   block:
     let nThreads = if osThreads > 0: osThreads else: max(1, countProcessors())
-    storeOsThreadCount(httpSrv, nThreads)
-    httpSrv.maxConnections = connLimit
-    httpSrv.maxInflight = inflightLimit
-    httpSrv.port = uint16(bindPort)
-    var rt = HttpRuntime(
-      httpServer: httpSrv,
-      useReusePort: when defined(linux): true else: false)
-    when defined(linux):
-      for i in 0 ..< nThreads:
-        let li = makeListener(bindPort)
-        let j = rt.listeners.len
-        setLen(rt.listeners, j + 1)
-        rt.listeners[j] = li
-    else:
-      rt.sharedListener = listenTcp(bindPort)
-    for i in 0 ..< nThreads:
-      var fds: array[2, cint]
-      if pipe(fds) != 0:
-        raiseOSError(osLastError())
-      discard fcntl(fds[0], F_SETFL, O_NONBLOCK)
-      block:
-        let j = rt.shutdownPipes.len
-        setLen(rt.shutdownPipes, j + 1)
-        rt.shutdownPipes[j] = (fds[1], fds[0])
-    block:
-      let j = httpRuntimes.len
-      setLen(httpRuntimes, j + 1)
-      httpRuntimes[j] = rt
-    httpSrv.runtime = cast[pointer](rt)
-    httpSrv.started = true
-    httpSrv.log(lvlInfo, "listening on port " & $bindPort & " with " & $nThreads & " OS threads")
+    let rt = setupRuntime(httpSrv, bindPort, nThreads, connLimit, inflightLimit)
 
-    proc shutdownAcceptWatcher(shutdownRfd: cint, victim: typeof(curTask())) {.flow.} =
-      while not shuttingdown:
-        waitReadable(shutdownRfd)
-        var dummy: array[16, char]
-        discard posix.read(shutdownRfd, addr dummy[0], 16)
-        break
-      cancel(victim)
-
-    proc connectionLoop(clientFd: SocketHandle, connSem, inflight: Semaphore) {.flow.} =
-      let s = httpSrv
-      let ctx = s.newHttpContext(clientFd)
+    proc connectionLoop(clientFd: SocketHandle, w: Worker) {.flow.} =
+      let ctx = httpSrv.newHttpContext(clientFd)
       try:
-        while ctx.keepAlive and not shuttingdown:
-          ctx.prepareHttpContext(s)
-          if not ctx.readHeader(s):
-            break
-          acquire(inflight)
+        while ctx.beginRequest():
+          acquire(w.inflight)
           try:
-            if s.parserequestline and not ctx.parseRequestLine(s):
-              break
-            case s.contenttype
-            of ContentType.NoBody:
-              discard
-            of ContentType.Compact:
-              let bufCap = s.bufferlength + 1
-              if ctx.contentlength > 0 and ctx.bodystart + ctx.contentlength > bufCap:
-                ctx.closeHttpSocket(ProtocolViolated, "content-length too large")
-                break
-              if not ctx.receiveToSingleBuffer(s):
-                break
-            of ContentType.Streaming:
-              discard
             handler(ctx)
           finally:
-            release(inflight)
-          if shuttingdown:
+            release(w.inflight)
+          if not ctx.endRequest():
             break
-          ctx.recordCarry(s)
-          if ctx.carryLen > 0:
-            continue
-          var probe = [0.char]
-          let r = recv(ctx.socket, addr probe[0], 1, MSG_PEEK or MSG_DONTWAIT)
-          if r <= 0:
-            let e = osLastError()
-            if r == 0 or e.int notin [EAGAIN.int, EWOULDBLOCK.int]:
-              break
-            ctx.waitSocketReadable()
       except CancelledError:
         ctx.closeHttpSocket(TimedOut, "cancelled")
       except CatchableError as ex:
         ctx.closeHttpSocket(Excepted, ex.msg)
       finally:
-        release(connSem)
-        if ctx.socket != INVALID_SOCKET:
-          ctx.closeHttpSocket(CloseCalled, "")
+        release(w.connSem)
+        ctx.closeHttpSocket(CloseCalled, "")
 
     proc workerAcceptLoop(runtime: HttpRuntime, workerIdx: int) {.flow.} =
       let s = runtime.httpServer
-      let perConn = max(1, (s.maxConnections + nThreads - 1) div nThreads)
-      let perInflight = max(1, (s.maxInflight + nThreads - 1) div nThreads)
-      let connSem = newSemaphore(perConn)
-      let inflight = newSemaphore(perInflight)
-      let listener =
-        if runtime.useReusePort and workerIdx < runtime.listeners.len:
-          runtime.listeners[workerIdx]
-        else:
-          runtime.sharedListener
-      let shutdownRfd = runtime.shutdownPipes[workerIdx][1]
+      let w = newWorker(runtime, nThreads)
+      let listener = runtime.listenerFor(workerIdx)
       let acceptLoop = curTask()
-      discard go shutdownAcceptWatcher(shutdownRfd, acceptLoop)
+      discard go shutdownAcceptWatcher(runtime.shutdownPipes[workerIdx][1], acceptLoop)
       scope conns:
-        while not shuttingdown:
-          acquire(connSem)
+        while not isShuttingDown():
+          acquire(w.connSem)
+          var stream: TcpStream
           try:
-            let stream = listener.accept()
-            let clientFd = stream.fd
-            discard conns.go connectionLoop(clientFd, connSem, inflight)
-          except CatchableError:
-            release(connSem)
+            stream = listener.accept()
+          except CancelledError:
+            release(w.connSem)
+            raise
+          except CatchableError as e:
+            release(w.connSem)
+            s.log(lvlError, "accept: " & e.msg)
+            delay(50)             # e.g. EMFILE: don't spin
+            continue
+          discard conns.go connectionLoop(stream.fd, w)
 
     proc workerThreadMain(w: WorkerIdx) {.thread.} =
       {.cast(gcsafe).}:
@@ -182,12 +176,9 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
     for i in 0 ..< nThreads:
       createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i))
 
-template start* = serve
-template join* = wait
+template start*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
+                connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
+  serve(httpSrv, bindPort, handler, osThreads, connLimit, inflightLimit)
 
-template wait*(srv: HttpServer) =
-  block:
-    let rt = cast[HttpRuntime](srv.runtime)
-    if not rt.isNil:
-      for i in 0 ..< rt.threads.len:
-        joinThread(rt.threads[i])
+proc wait*(srv: HttpServer) = joinRuntime(srv)
+proc join*(srv: HttpServer) = joinRuntime(srv)

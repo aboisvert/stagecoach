@@ -1,6 +1,7 @@
 ## Shared HTTP server types and constants (no request/response I/O).
 
 import std/[strtabs, logging, strutils]
+import stagelane/net
 import coachserver
 export coachserver
 
@@ -20,15 +21,28 @@ type
     contenttype*: ContentType
     maxheaderlength*: int64
     bufferlength*: int64
-    sockettimeoutms*: int
+    sockettimeoutms*: int      ## max wait for any single read/write (<= 0: none)
+    requestTimeoutms*: int     ## max time to receive a full header/body once started (<= 0: none)
     parserequestline*: bool
     headerfields*: seq[string]
     osThreads*: int
     maxConnections*: int
     maxInflight*: int
-    runtime*: pointer
+    runtime*: HttpRuntime
 
   HttpServer* = ref HttpServerObj
+
+  WorkerIdx* = object
+    runtime*: HttpRuntime
+    idx*: int
+
+  HttpRuntime* = ref object
+    ## Per-`serve` state: one listener and shutdown pipe per worker thread.
+    httpServer*: HttpServer
+    threads*: seq[Thread[WorkerIdx]]
+    shutdownPipes*: seq[(cint, cint)]   # (write end, read end)
+    listeners*: seq[TcpListener]        # per-worker (SO_REUSEPORT) when non-empty
+    sharedListener*: TcpListener
 
   HttpContext* = ref object of RootObj
     server*: HttpServer
@@ -47,6 +61,9 @@ type
     headers*: StringTableRef
     keepAlive*: bool
     streamScratch*: string
+    sendBuf*: string       ## reused response buffer
+    http10*: bool
+    wanted*: seq[string]   ## lower-case header names captured into `headers`
 
 const
   MSG_DONTWAIT* = when defined(macosx): 0x80.cint else: 0x40.cint
@@ -59,12 +76,14 @@ proc initHttpServer*(s: HttpServer, loglevel: Level, parserequestline: bool,
   s.maxheaderlength = 10000.int64
   s.bufferlength = 100000.int64
   s.sockettimeoutms = 5000
+  s.requestTimeoutms = 30000
   s.contenttype = contenttype
   s.parserequestline = parserequestline
   s.headerfields = @headerfields
   s.osThreads = 0
   s.maxConnections = 0
   s.maxInflight = 0
+  s.runtime = nil
 
 proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
                     contenttype = ContentType.Compact, headerfields: openArray[string] = []): HttpServer =
@@ -77,12 +96,14 @@ proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
 
 proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result = HttpContext(server: server, socket: socket, bodystart: -1, keepAlive: true)
-  result.request = newString(server.bufferlength + 1)
-  if server.contenttype == ContentType.Streaming:
-    result.streamScratch = newString(server.bufferlength.int)
-  if server.contenttype != ContentType.NoBody or server.headerfields.len > 0:
-    result.headers = newStringTable()
-    for field in server.headerfields:
-      result.headers[field] = ""
-    if not result.headers.contains("content-length"):
-      result.headers["content-length"] = ""
+  # Start header-sized; Compact bodies grow the buffer on demand (see readHeader).
+  result.request = newString(min(server.maxheaderlength, server.bufferlength) + 1)
+  result.headers = newStringTable()
+  for field in server.headerfields:
+    result.wanted.add field
+  for field in ["connection", "transfer-encoding"]:
+    if field notin result.wanted: result.wanted.add field
+  if server.contenttype != ContentType.NoBody and "content-length" notin result.wanted:
+    result.wanted.add "content-length"
+  for field in result.wanted:
+    result.headers[field] = ""

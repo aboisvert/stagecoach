@@ -42,8 +42,8 @@ wait(server)                         # aliases: join(server, ...)
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `osThreads` | CPU count, at least 1 | OS threads running stagelane |
-| `connLimit` | 1024 | Max connections per worker (split across workers) |
-| `inflightLimit` | 64 | Max requests in handler at once per worker |
+| `connLimit` | 1024 | Max connections for this server (divided across workers) |
+| `inflightLimit` | 64 | Max requests in handlers at once for this server (divided across workers) |
 
 Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
@@ -69,10 +69,12 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 - [`stagecoach/coachserver`](stagecoach/coachserver.nim) — logging, `shutdown()`, close causes
 - [`stagecoach/flow`](stagecoach/flow.nim) — stagelane `{.flow.}` support for your handlers
 
-## Release notes, 9.0.3 (stagelane port)
+## Release notes, 0.1 (stagelane port)
 
 - HTTP server on stagelane: M worker threads, connection and in-flight limits, `{.flow.}` handlers with explicit `HttpContext`
 - Removed: `dispatcher`, `epolldispatcher`, websocket and multipart servers, deferred `replyPending` / `asyncdispatch` pattern
+- Request framing is strict: `Transfer-Encoding` request bodies and invalid/negative `Content-Length` are rejected; `Connection: close` and HTTP/1.0 are honored
+- `requestTimeoutms` bounds total header/body receive time (slowloris protection)
 - Dependencies: stagelane via Atlas (`atlas install`)
 
 ## Older notes (pre-stagelane)

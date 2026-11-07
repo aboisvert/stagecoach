@@ -5,8 +5,6 @@ license       = "MIT"
 
 skipDirs = @["examples"]
 
-binDir = "bin"
-bin = @["stagecoach"]
 
 requires "nim >= 2.2.0"
 requires "https://github.com/ghazalialshafi/stagelane#head"

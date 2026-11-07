@@ -1,6 +1,6 @@
 const StagecoachVersion* = "0.1"
 
-import std/logging
+import std/[logging, atomics]
 from std/posix import SocketHandle, INVALID_SOCKET, SIGINT, SIGTERM, onSignal, `==`, close
 from std/strutils import replace
 
@@ -39,15 +39,17 @@ type
   StagecoachServer* = ref StagecoachServerObj
 
 var
-  shuttingdown* = false
+  shuttingdown*: Atomic[bool]
   nextid: int
   shutdownCallbacks* {.global.}: seq[proc() {.nimcall, raises: [].}]
+
+proc isShuttingDown*(): bool {.inline.} = shuttingdown.load(moRelaxed)
 
 proc `$`*(x: SocketHandle): string {.inline.} = $(x.cint)
 
 proc shutdown*() =
   {.gcsafe.}:
-    shuttingdown = true
+    shuttingdown.store(true, moRelease)
     for shutdownCallback in shutdownCallbacks:
       shutdownCallback()
 

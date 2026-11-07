@@ -1,11 +1,12 @@
+import std/atomics
 import stagecoach/[flow, httpserver]
 
 const testPort = 18081
-var hits = 0
+var hits: Atomic[int]
 
 proc handler(ctx: HttpContext) {.flow.} =
-  hits.inc
-  ctx.reply("hit=" & $hits)
+  let n = hits.fetchAdd(1) + 1
+  ctx.reply("hit=" & $n)
 
 let server = newHttpServer(loglevel = lvlError)
 server.sockettimeoutms = 400

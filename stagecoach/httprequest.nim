@@ -1,12 +1,12 @@
-import std/[strutils, os, strtabs]
+import std/[strutils, os, strtabs, monotimes, times]
 import std/posix as posix
-from std/posix import recv, MSG_PEEK, EAGAIN, EWOULDBLOCK
+from std/posix import recv, EAGAIN, EWOULDBLOCK, EINTR
 import std/logging
 import stagelane/sched
 import stagelane/core
 import stagelane/transform
 import httpservercore
-from coachserver import SocketCloseCause, shuttingdown, closeSocket
+from coachserver import SocketCloseCause, isShuttingDown, closeSocket
 
 proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
   let fd = ctx.socket
@@ -15,55 +15,89 @@ proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
   ctx.socket = INVALID_SOCKET
   closeSocket(ctx.server, fd, cause, msg)
 
-proc classifyRecv*(ret: int, ctx: HttpContext): SocketState =
-  if unlikely(shuttingdown):
+# --- socket helpers ---------------------------------------------------------
+
+proc classifyRecv*(ret: int, cause: var SocketCloseCause, msg: var string): SocketState =
+  ## Pure classification of a `recv` result; the caller decides whether to close.
+  if unlikely(isShuttingDown()):
+    cause = CloseCalled
+    msg = "shutting down"
     return Fail
   if likely(ret > 0):
     return Progress
   if unlikely(ret == 0):
-    closeHttpSocket(ctx, ClosedbyClient, "peer closed")
+    cause = ClosedbyClient
+    msg = "peer closed"
     return Fail
   let lastError = osLastError().int
-  if lastError in [EAGAIN.int, EWOULDBLOCK.int]:
+  if lastError in [EAGAIN.int, EWOULDBLOCK.int, EINTR.int]:
     return TryAgain
-  var cause = NetErrored
-  if lastError == posix.EBADF.int:
-    cause = AlreadyClosed
-  elif lastError == posix.EFAULT.int:
-    cause = EFault
-  elif lastError == posix.EPIPE.int:
-    cause = ConnectionLost
-  elif lastError == posix.ECONNRESET.int:
-    cause = ClosedbyClient
-  closeHttpSocket(ctx, cause, osErrorMsg(OSErrorCode(lastError)))
+  cause = NetErrored
+  if lastError == posix.EBADF.int: cause = AlreadyClosed
+  elif lastError == posix.EFAULT.int: cause = EFault
+  elif lastError == posix.EPIPE.int: cause = ConnectionLost
+  elif lastError == posix.ECONNRESET.int: cause = ClosedbyClient
+  msg = osErrorMsg(OSErrorCode(lastError))
   Fail
 
+proc checkRecv*(ctx: HttpContext, ret: int): SocketState =
+  ## `classifyRecv`, closing the socket on failure.
+  var cause = CloseCalled
+  var msg = ""
+  result = classifyRecv(ret, cause, msg)
+  if result == Fail:
+    closeHttpSocket(ctx, cause, msg)
+
+template withSocketTimeout(ctx: HttpContext, waitCall: untyped) =
+  let ms = ctx.server.sockettimeoutms
+  if ms <= 0:
+    waitCall
+  else:
+    let self = curTask()
+    let timer = addTimer(ms, proc () = cancel(self))
+    try:
+      waitCall
+    finally:
+      cancel(timer)
+
 proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
-  let server = ctx.server
-  if server.sockettimeoutms <= 0:
-    waitReadable(int(ctx.socket))
-    return
-  let self = curTask()
-  let timer = addTimer(server.sockettimeoutms, proc () = cancel(self))
-  try:
-    waitReadable(int(ctx.socket))
-  finally:
-    cancel(timer)
+  ctx.withSocketTimeout(waitReadable(int(ctx.socket)))
+
+proc waitSocketWritableImpl*(ctx: HttpContext) {.flow.} =
+  ctx.withSocketTimeout(waitWritable(int(ctx.socket)))
+
+proc waitSocketWritable*(ctx: HttpContext) {.flow.} = ctx.waitSocketWritableImpl()
 
 proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
+  ## Reads up to `n` bytes, waiting while the socket would block.
+  ## Returns 0 on EOF and < 0 on a real error.
   while true:
     let r = recv(ctx.socket, buf, n.cint, MSG_DONTWAIT)
-    if r > 0:
+    if r >= 0:
       return r
-    if r == 0:
-      return 0
-    let e = osLastError()
-    if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
+    let e = osLastError().int
+    if e == EINTR.int:
+      continue
+    if e in [EAGAIN.int, EWOULDBLOCK.int]:
       ctx.waitSocketReadable()
     else:
       return r
 
-proc parseMethod*(ctx: HttpContext, server: HttpServer): bool =
+# --- byte helpers -----------------------------------------------------------
+
+proc bytesEq(buf: string, start: int64, s: string): bool {.inline.} =
+  if s.len == 0: return true
+  start >= 0 and start + s.len <= buf.len and equalMem(unsafeAddr buf[start], unsafeAddr s[0], s.len)
+
+proc eqLower(buf: string, start, len: int, lowerName: string): bool {.inline.} =
+  if len != lowerName.len: return false
+  for i in 0 ..< len:
+    if buf[start + i].toLowerAscii() != lowerName[i]: return false
+  true
+
+# --- request line -----------------------------------------------------------
+
+proc parseMethod*(ctx: HttpContext): bool =
   if unlikely(ctx.requestlen < 13):
     ctx.closeHttpSocket(ProtocolViolated, "too short request")
     return false
@@ -72,13 +106,19 @@ proc parseMethod*(ctx: HttpContext, server: HttpServer): bool =
   if unlikely(ctx.methlen == ctx.requestlen):
     ctx.closeHttpSocket(ProtocolViolated, "http method missing")
     return false
-  if unlikely(ctx.request[0 .. 1] notin ["GE", "PO", "HE", "PU", "DE", "CO", "OP", "TR", "PA"]):
+  const prefixes = ["GE", "PO", "HE", "PU", "DE", "CO", "OP", "TR", "PA"]
+  var ok = false
+  for p in prefixes:
+    if ctx.request[0] == p[0] and ctx.request[1] == p[1]:
+      ok = true
+      break
+  if unlikely(not ok):
     ctx.closeHttpSocket(ProtocolViolated, "invalid http method")
     return false
   true
 
 proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
-  if not ctx.parseMethod(server):
+  if not ctx.parseMethod():
     return false
   var i = ctx.methlen + 1
   let start = i
@@ -86,55 +126,19 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
     i.inc
   ctx.uristart = start
   ctx.urilen = i - start
-  if unlikely(ctx.requestlen < ctx.uristart + ctx.urilen + 9):
+  let ver = ctx.uristart + ctx.urilen + 1
+  if unlikely(ctx.requestlen < ver + 8):
     ctx.closeHttpSocket(ProtocolViolated, "parseRequestLine: no version")
     return false
-  if unlikely(ctx.request[ctx.uristart + ctx.urilen + 1] != 'H' or
-      ctx.request[ctx.uristart + ctx.urilen + 8] != '1'):
-    ctx.closeHttpSocket(ProtocolViolated, "request not HTTP/1.1")
+  if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.") or ctx.request[ver + 7] notin {'0', '1'}):
+    ctx.closeHttpSocket(ProtocolViolated, "request not HTTP/1.x")
     return false
+  ctx.http10 = ctx.request[ver + 7] == '0'
   server.log(lvlDebug, $server.port & "/" & $ctx.socket & ": " &
-    ctx.request[0 .. ctx.uristart + ctx.urilen + 8])
+    ctx.request[0 ..< ver + 8])
   true
 
-const ContentLengthNeedle = "content-length:"
-
-proc findContentLength(ctx: HttpContext, last: int): int =
-  let nlen = ContentLengthNeedle.len
-  if last < nlen - 1:
-    return -1
-  var i = 0
-  while i + nlen <= last:
-    var j = 0
-    while j < nlen and ctx.request[i + j].toLowerAscii() == ContentLengthNeedle[j]:
-      inc j
-    if j == nlen:
-      return i
-    inc i
-  -1
-
-proc getContentLength*(ctx: HttpContext, server: HttpServer): bool =
-  let last = if ctx.bodystart > 0: ctx.bodystart - 1 else: ctx.requestlen.int - 1
-  if last < ContentLengthNeedle.len - 1:
-    return true
-  let start = ctx.findContentLength(last)
-  if start == -1:
-    return true
-  var i = start + ContentLengthNeedle.len
-  while i < ctx.requestlen and ctx.request[i] != '\c':
-    i += 1
-  if i == ctx.requestlen:
-    return true
-  try:
-    ctx.contentlength = parseInt(strip(ctx.request[start + ContentLengthNeedle.len ..< i]))
-  except ValueError:
-    ctx.closeHttpSocket(ProtocolViolated, "could not parse content-length")
-    return false
-  let bufCap = server.bufferlength + 1
-  if ctx.bodystart >= 0 and ctx.bodystart + ctx.contentlength > bufCap:
-    ctx.closeHttpSocket(ProtocolViolated, "content-length exceeds buffer")
-    return false
-  true
+# --- headers ----------------------------------------------------------------
 
 proc isHeaderreceived*(ctx: HttpContext, previouslen, currentlen: int): bool =
   if currentlen < 4:
@@ -148,26 +152,89 @@ proc isHeaderreceived*(ctx: HttpContext, previouslen, currentlen: int): bool =
     inc i
   false
 
+proc parseHeaders*(ctx: HttpContext) =
+  ## Line-based scan that stores only the header names in `ctx.wanted`.
+  ## Requires `ctx.bodystart` to be set (header block complete).
+  let hdrEnd = ctx.bodystart - 2          # points at the blank line's CR
+  var i = 0
+  while i < hdrEnd and ctx.request[i] != '\l':   # skip the request line
+    inc i
+  inc i
+  while i < hdrEnd:
+    var eol = i
+    while eol < hdrEnd and ctx.request[eol] != '\l':
+      inc eol
+    var lineEnd = eol
+    if lineEnd > i and ctx.request[lineEnd - 1] == '\c':
+      dec lineEnd
+    var colon = i
+    while colon < lineEnd and ctx.request[colon] != ':':
+      inc colon
+    if colon < lineEnd:
+      var nameEnd = colon
+      while nameEnd > i and ctx.request[nameEnd - 1] in {' ', '\t'}:
+        dec nameEnd
+      for w in ctx.wanted:
+        if eqLower(ctx.request, i, nameEnd - i, w):
+          var vs = colon + 1
+          while vs < lineEnd and ctx.request[vs] in {' ', '\t'}:
+            inc vs
+          var ve = lineEnd
+          while ve > vs and ctx.request[ve - 1] in {' ', '\t'}:
+            dec ve
+          ctx.headers[w] = ctx.request[vs ..< ve]
+          break
+    i = eol + 1
+
+proc requestLineIsHttp10(ctx: HttpContext): bool =
+  var e = 0
+  while e < ctx.bodystart and ctx.request[e] != '\c':
+    inc e
+  e >= 8 and ctx.request[e - 8 ..< e] == "HTTP/1.0"
+
+proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
+  ## Validates framing headers (Content-Length, Transfer-Encoding) and decides
+  ## keep-alive. Closes the socket and returns false on a protocol violation.
+  ctx.parseHeaders()
+  if ctx.headers["transfer-encoding"].len > 0:
+    ctx.closeHttpSocket(ProtocolViolated, "transfer-encoding not supported")
+    return false
+  if server.contenttype != ContentType.NoBody:
+    let raw = ctx.headers["content-length"]
+    if raw.len > 0:
+      var n: int64
+      try:
+        for c in raw:
+          if c notin {'0' .. '9'}: raise newException(ValueError, "digit")
+        n = parseBiggestInt(raw)
+      except ValueError:
+        ctx.closeHttpSocket(ProtocolViolated, "non-parseable content-length")
+        return false
+      if n < 0:
+        ctx.closeHttpSocket(ProtocolViolated, "negative content-length")
+        return false
+      if server.contenttype == ContentType.Compact and n > server.bufferlength + 1 - ctx.bodystart:
+        ctx.closeHttpSocket(ProtocolViolated, "content-length exceeds buffer")
+        return false
+      ctx.contentlength = n
+  let http10 = ctx.requestLineIsHttp10()
+  ctx.http10 = http10
+  let conn = ctx.headers["connection"].toLowerAscii()
+  ctx.keepAlive = if http10: conn == "keep-alive" else: conn != "close"
+  true
+
+# --- accessors --------------------------------------------------------------
+
 proc getUri*(ctx: HttpContext): string =
   if ctx.urilen == 0:
     return ""
   ctx.request[ctx.uristart ..< ctx.uristart + ctx.urilen]
 
 proc isUri*(ctx: HttpContext, uri: string): bool =
-  if ctx.urilen != uri.len:
-    return false
-  for i in 0 ..< ctx.urilen:
-    if ctx.request[ctx.uristart + i] != uri[i]:
-      return false
-  true
+  ctx.urilen == uri.len and ctx.request.bytesEq(ctx.uristart, uri)
 
 proc startsUri*(ctx: HttpContext, uristart: string): bool =
-  if ctx.urilen < uristart.len:
-    return false
-  for i in 0 ..< uristart.len:
-    if ctx.request[ctx.uristart + i] != uristart[i]:
-      return false
-  true
+  ctx.urilen >= uristart.len and ctx.request.bytesEq(ctx.uristart, uristart)
 
 proc getMethod*(ctx: HttpContext): string =
   if ctx.methlen == 0:
@@ -175,29 +242,27 @@ proc getMethod*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.methlen]
 
 proc isMethod*(ctx: HttpContext, amethod: string): bool =
-  if ctx.methlen != amethod.len:
-    return false
-  for i in 0 ..< ctx.methlen:
-    if ctx.request[i] != amethod[i]:
-      return false
-  true
+  ctx.methlen == amethod.len and ctx.request.bytesEq(0, amethod)
+
+proc bodyEnd*(ctx: HttpContext): int64 {.inline.} =
+  ## End offset (exclusive) of this request's body inside `ctx.request`;
+  ## never includes bytes of a following pipelined request.
+  if ctx.bodystart < 0: ctx.requestlen
+  else: ctx.bodystart + min(ctx.contentreceived, max(ctx.contentlength, 0))
 
 proc getBody*(ctx: HttpContext): string =
-  if ctx.bodystart < 1:
+  if ctx.bodystart < 0:
     return ""
-  ctx.request[ctx.bodystart ..< ctx.requestlen]
+  ctx.request[ctx.bodystart ..< ctx.bodyEnd]
 
 proc isBody*(ctx: HttpContext, body: string): bool =
-  let len = ctx.requestlen - ctx.bodystart
-  if len != body.len:
-    return false
-  for i in 0 ..< len:
-    if ctx.request[ctx.bodystart + i] != body[i]:
-      return false
-  true
+  ctx.bodystart >= 0 and ctx.bodyEnd - ctx.bodystart == body.len and
+    ctx.request.bytesEq(ctx.bodystart, body)
 
 proc getRequest*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.requestlen]
+
+# --- per-request state ------------------------------------------------------
 
 proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
   if ctx.carryLen > 0:
@@ -214,19 +279,13 @@ proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
   ctx.bodystart = -1
   ctx.contentreceived = 0
   ctx.bodyDelivered = 0
-  if server.headerfields.len > 0 and not ctx.headers.isNil:
-    for key in server.headerfields:
-      ctx.headers[key].setLen(0)
+  ctx.keepAlive = true
+  ctx.http10 = false
+  for key in ctx.wanted:
+    ctx.headers[key].setLen(0)
 
 proc recordCarry*(ctx: HttpContext, server: HttpServer) =
-  var reqEnd = ctx.requestlen
-  if ctx.bodystart >= 0:
-    if server.contenttype == ContentType.Compact and ctx.contentlength > 0:
-      reqEnd = ctx.bodystart + ctx.contentlength
-    elif ctx.contentlength > 0:
-      reqEnd = ctx.bodystart + ctx.contentreceived
-    else:
-      reqEnd = ctx.bodystart
+  let reqEnd = ctx.bodyEnd
   if ctx.requestlen > reqEnd:
     ctx.carryLen = ctx.requestlen - reqEnd
     ctx.carryStart = reqEnd
@@ -234,159 +293,98 @@ proc recordCarry*(ctx: HttpContext, server: HttpServer) =
     ctx.carryLen = 0
     ctx.carryStart = 0
 
-proc parseHeaders*(ctx: HttpContext) =
-  var value = false
-  var current: (string, string) = ("", "")
-  var i = 0
-  while i <= ctx.requestlen - 4:
-    case ctx.request[i]
-    of '\c':
-      if ctx.request[i + 1] == '\l' and ctx.request[i + 2] == '\c' and ctx.request[i + 3] == '\l':
-        if ctx.headers.contains(current[0]):
-          ctx.headers[current[0]] = current[1]
-        return
-    of ':':
-      if value:
-        current[1].add(':')
-      value = true
-    of ' ':
-      if value:
-        if current[1].len != 0:
-          current[1].add(ctx.request[i])
-      else:
-        current[0].add(ctx.request[i])
-    of '\l':
-      if ctx.headers.contains(current[0]):
-        ctx.headers[current[0]] = current[1]
-      value = false
-      current = ("", "")
-    else:
-      if value:
-        current[1].add(ctx.request[i])
-      else:
-        current[0].add(ctx.request[i].toLowerAscii())
-    inc i
+# --- receiving --------------------------------------------------------------
 
-proc hasRequestData*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
-  var probe = [0.char]
-  var r = recv(ctx.socket, addr probe[0], 1, MSG_PEEK or MSG_DONTWAIT)
-  if likely(r == 1):
-    return true
-  let state = classifyRecv(r, ctx)
-  if state == TryAgain:
-    ctx.waitSocketReadable()
-    r = recv(ctx.socket, addr probe[0], 1, MSG_PEEK or MSG_DONTWAIT)
-    if r == 1:
-      return true
-    let again = classifyRecv(r, ctx)
-    if again == TryAgain:
-      ctx.closeHttpSocket(ClosedbyClient, "client sent nothing")
-  false
+proc timedOut(server: HttpServer, t0: MonoTime): bool {.inline.} =
+  server.requestTimeoutms > 0 and (getMonoTime() - t0).inMilliseconds > server.requestTimeoutms
 
 proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
+  var t0 = getMonoTime()
+  var started = ctx.requestlen > 0      # the clock starts at the first byte
   while true:
-    if shuttingdown:
+    if isShuttingDown():
       return false
-    let maxRead = (1 + server.maxheaderlength - ctx.requestlen).int
+    let limit = min(1 + server.maxheaderlength, ctx.request.len.int64)
+    let maxRead = (limit - ctx.requestlen).int
     if maxRead <= 0:
       ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
       return false
     let prev = ctx.requestlen.int
     let ret = ctx.recvSome(addr ctx.request[ctx.requestlen], maxRead)
-    let state = classifyRecv(ret, ctx)
-    if state == Fail:
+    if ret <= 0 and ctx.checkRecv(ret) == Fail:
       return false
-    if state == TryAgain:
-      continue
+    if not started:
+      started = true
+      t0 = getMonoTime()
     ctx.requestlen += ret
     if ctx.isHeaderreceived(prev, ctx.requestlen.int):
-      break
+      return true
     if ctx.requestlen > server.maxheaderlength:
       ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
       return false
-  ctx.contentreceived = ctx.requestlen - ctx.bodystart
-  true
+    if timedOut(server, t0):
+      ctx.closeHttpSocket(TimedOut, "request header too slow")
+      return false
 
 proc readHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
-  if ctx.requestlen == 0:
-    if not ctx.hasRequestData(server):
-      return false
   if ctx.bodystart < 0 and ctx.requestlen >= 4:
-    discard ctx.isHeaderreceived(0, ctx.requestlen.int)
+    discard ctx.isHeaderreceived(0, ctx.requestlen.int)     # carried bytes
   if ctx.bodystart < 0 and not ctx.receiveHeader(server):
     return false
-  if server.headerfields.len == 0:
-    if server.contenttype == ContentType.NoBody:
-      return true
-    return ctx.getContentLength(server)
-  ctx.parseHeaders()
-  if server.contenttype != ContentType.NoBody:
-    try:
-      if ctx.headers["content-length"].len > 0:
-        ctx.contentlength = ctx.headers["content-length"].parseInt()
-        let bufCap = server.bufferlength + 1
-        if ctx.bodystart >= 0 and ctx.bodystart + ctx.contentlength > bufCap:
-          ctx.closeHttpSocket(ProtocolViolated, "content-length exceeds buffer")
-          return false
-    except ValueError:
-      ctx.closeHttpSocket(ProtocolViolated, "non-parseable content-length")
-      return false
+  ctx.contentreceived = ctx.requestlen - ctx.bodystart
+  if not ctx.processHeaders(server):
+    return false
+  if server.contenttype == ContentType.Compact:
+    let cap = ctx.bodystart + ctx.contentlength + 1
+    if ctx.request.len < cap:
+      ctx.request.setLen(cap)
   true
 
 proc receiveToSingleBuffer*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
-  if ctx.contentlength == 0:
-    return true
   if ctx.contentreceived >= ctx.contentlength:
     return true
+  let t0 = getMonoTime()
   while ctx.contentreceived < ctx.contentlength:
-    if shuttingdown:
+    if isShuttingDown():
       return false
     let need = ctx.contentlength - ctx.contentreceived
-    let recvsize = min(need, server.bufferlength).int
     let position = ctx.bodystart + ctx.contentreceived
-    let ret = ctx.recvSome(addr ctx.request[position], recvsize)
-    let state = classifyRecv(ret, ctx)
-    if state == Fail:
+    let ret = ctx.recvSome(addr ctx.request[position], need.int)
+    if ret <= 0 and ctx.checkRecv(ret) == Fail:
       return false
-    if state == TryAgain:
-      continue
-    let got = min(ret.int64, need)
-    ctx.contentreceived += got
+    ctx.contentreceived += ret
     ctx.requestlen = ctx.bodystart + ctx.contentreceived
-    if ret.int64 > got:
-      ctx.carryStart = position + got
-      ctx.carryLen = ret.int64 - got
-      ctx.requestlen = ctx.carryStart + ctx.carryLen
+    if ctx.contentreceived < ctx.contentlength and timedOut(server, t0):
+      ctx.closeHttpSocket(TimedOut, "request body too slow")
+      return false
   true
 
 proc readBodyChunk*(ctx: HttpContext, server: HttpServer): (SocketState, string) {.flow.} =
   if ctx.contentlength == 0:
     return (Complete, "")
-  if ctx.bodyDelivered < ctx.contentreceived:
+  let avail = min(ctx.contentreceived, ctx.contentlength)
+  if ctx.bodyDelivered < avail:
     let start = ctx.bodystart + ctx.bodyDelivered
-    let n = ctx.contentreceived - ctx.bodyDelivered
+    let n = avail - ctx.bodyDelivered
     let chunk = ctx.request[start ..< start + n]
-    ctx.bodyDelivered = ctx.contentreceived
-    if ctx.contentreceived >= ctx.contentlength:
+    ctx.bodyDelivered = avail
+    if avail >= ctx.contentlength:
       return (Complete, chunk)
     return (Progress, chunk)
-  if ctx.contentreceived >= ctx.contentlength:
+  if avail >= ctx.contentlength:
     return (Complete, "")
-  while true:
-    if shuttingdown:
-      return (Fail, "")
-    let need = ctx.contentlength - ctx.contentreceived
-    let recvsize = min(need, server.bufferlength).int
-    let ret = ctx.recvSome(addr ctx.streamScratch[0], recvsize)
-    let state = classifyRecv(ret, ctx)
-    if state == Fail:
-      return (Fail, "")
-    if state == TryAgain:
-      return (TryAgain, "")
-    let got = min(ret.int64, need)
-    ctx.contentreceived += got
-    ctx.bodyDelivered += got
-    let chunk = if got > 0: ctx.streamScratch[0 ..< got.int] else: ""
-    if ctx.contentreceived >= ctx.contentlength:
-      return (Complete, chunk)
-    return (Progress, chunk)
+  if isShuttingDown():
+    return (Fail, "")
+  if ctx.streamScratch.len == 0:
+    ctx.streamScratch = newString(server.bufferlength.int)
+  let need = ctx.contentlength - ctx.contentreceived
+  let recvsize = min(need, ctx.streamScratch.len.int64).int
+  let ret = ctx.recvSome(addr ctx.streamScratch[0], recvsize)
+  if ret <= 0 and ctx.checkRecv(ret) == Fail:
+    return (Fail, "")
+  ctx.contentreceived += ret
+  ctx.bodyDelivered += ret
+  let chunk = ctx.streamScratch[0 ..< ret]
+  if ctx.contentreceived >= ctx.contentlength:
+    return (Complete, chunk)
+  (Progress, chunk)

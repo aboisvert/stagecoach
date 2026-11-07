@@ -12,5 +12,5 @@ import httpresponse
 export httpresponse
 import stagelane/sched
 export sched.CancelledError
-
-include stagedispatcher
+import stagedispatcher
+export stagedispatcher

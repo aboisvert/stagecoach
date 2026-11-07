@@ -1,93 +1,76 @@
-import std/[strutils, strformat, os]
-import stagelane/sched
+import std/[strutils, os]
 import stagelane/core
 import stagelane/transform
 import httpservercore
-from coachserver import SocketCloseCause, shuttingdown
-from httprequest import closeHttpSocket
-from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK, EPIPE, ECONNRESET
+from coachserver import SocketCloseCause, isShuttingDown
+from httprequest import closeHttpSocket, waitSocketWritableImpl
+from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK, EINTR
 import httpcore
 
 const lastSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT
 const moreSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT + MSG_MORE
 
-let
+const
   version = "HTTP/1.1 "
   http200nocontent = "HTTP/1.1 200 OK\c\LContent-Length: 0\c\L\c\L"
-  http200nocontentlen = 38
   http204string = "HTTP/1.1 204 No Content\c\L\c\L"
-  http204stringlen = 27
   shortdivider = "\c\L"
   longdivider = "\c\L\c\L"
   contentlen = "Content-Length: "
   zerocontent = "Content-Length: 0\c\L"
 
-proc classifySend(ret: int, ctx: HttpContext): SocketState =
-  if unlikely(shuttingdown):
-    return Fail
-  if likely(ret > 0):
-    return Progress
-  let lastError = osLastError()
-  if lastError.int in [EAGAIN.int, EWOULDBLOCK.int]:
-    return TryAgain
-  closeHttpSocket(ctx, NetErrored, osErrorMsg(lastError))
-  Fail
-
-proc waitSocketWritable*(ctx: HttpContext) {.flow.} =
-  let server = ctx.server
-  if server.sockettimeoutms <= 0:
-    waitWritable(int(ctx.socket))
-    return
-  let self = curTask()
-  let timer = addTimer(server.sockettimeoutms, proc () = cancel(self))
-  try:
-    waitWritable(int(ctx.socket))
-  finally:
-    cancel(timer)
-
 proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): SocketState {.flow.} =
-  if length == 0:
-    return Complete
+  ## Sends exactly `length` bytes (waiting for writability as needed).
+  ## Closes the socket and returns Fail on error.
   var sent = 0
   while sent < length:
+    if isShuttingDown():
+      return Fail
     let ret = send(ctx.socket, cast[pointer](cast[int](data) + sent), (length - sent).cint, flags)
     if ret > 0:
       sent += ret
       continue
-    let state = classifySend(ret, ctx)
-    if state == TryAgain:
-      ctx.waitSocketWritable()
-    else:
-      return state
+    if ret < 0:
+      let e = osLastError()
+      if e.int == EINTR.int:
+        continue
+      if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
+        ctx.waitSocketWritableImpl()
+        continue
+      closeHttpSocket(ctx, NetErrored, osErrorMsg(e))
+      return Fail
+    ctx.waitSocketWritableImpl()   # send() returned 0: treat as would-block
   Complete
 
-proc writeToSocket*(ctx: HttpContext, text: string, length: int, flags: cint): SocketState {.flow.} =
-  if length == 0:
+proc writeToSocket*(ctx: HttpContext, text: string, flags: cint): SocketState {.flow.} =
+  if text.len == 0:
     return Complete
-  result = ctx.sendSome(unsafeAddr text[0], length, flags)
-  if result == Complete:
-    ctx.server.log(lvlDebug, "writeToSocket " & $ctx.socket & ": " & text[0 ..< length])
-
-proc replyFinish*(ctx: HttpContext): SocketState {.flow.} =
-  ctx.sendSome(nil, 0, lastSendFlags)
+  ctx.sendSome(unsafeAddr text[0], text.len, flags)
 
 proc reply*(ctx: HttpContext, code: HttpCode): SocketState {.flow.} =
   if code == Http200:
-    return ctx.writeToSocket(http200nocontent, http200nocontentlen, lastSendFlags)
+    return ctx.writeToSocket(http200nocontent, lastSendFlags)
   if code == Http204:
-    return ctx.writeToSocket(http204string, http204stringlen, lastSendFlags)
-  var head = version & $code & "\c\L" & zerocontent & shortdivider
-  ctx.writeToSocket(head, head.len, lastSendFlags)
+    return ctx.writeToSocket(http204string, lastSendFlags)
+  ctx.writeToSocket(version & $code & "\c\L" & zerocontent & shortdivider, lastSendFlags)
 
 proc reply*(ctx: HttpContext, code: HttpCode, body: string, extraHeaders: openArray[string] = []) {.flow.} =
-  let hdrs = extraHeaders.join("\c\L")
-  var buf = version & $code & "\c\L"
-  if hdrs.len > 0:
-    buf.add(hdrs & "\c\L")
-  buf.add(contentlen & $body.len & longdivider)
-  buf.add(body)
-  discard ctx.writeToSocket(buf, buf.len, lastSendFlags)
-  ctx.server.log(lvlAll, "reply ok")
+  ## Builds the response into the connection's reusable buffer and sends it in one write.
+  var buf = move ctx.sendBuf
+  buf.setLen(0)
+  buf.add version
+  buf.add $code
+  buf.add shortdivider
+  for h in extraHeaders:
+    buf.add h
+    buf.add shortdivider
+  buf.add contentlen
+  buf.addInt body.len
+  buf.add longdivider
+  buf.add body
+  discard ctx.writeToSocket(buf, lastSendFlags)
+  if buf.len < 65536:           # don't pin big responses to the connection
+    ctx.sendBuf = move buf
 
 template reply*(ctx: HttpContext, body: string) =
   ctx.reply(Http200, body)
@@ -100,21 +83,19 @@ proc replyStartChunked*(ctx: HttpContext, code: HttpCode = Http200, headers: ope
   for h in headers:
     buf.add(h & "\c\L")
   buf.add("Transfer-Encoding: chunked\c\L\c\L")
-  ctx.writeToSocket(buf, buf.len, moreSendFlags) != Fail
+  ctx.writeToSocket(buf, moreSendFlags) != Fail
 
 proc replyContinueChunked*(ctx: HttpContext, chunk: string): bool {.flow.} =
-  let delimiter = fmt"{chunk.len:X}" & shortdivider
-  if ctx.writeToSocket(delimiter, delimiter.len, moreSendFlags) == Fail:
-    return false
-  if ctx.writeToSocket(chunk, chunk.len, moreSendFlags) == Fail:
-    return false
-  ctx.writeToSocket(shortdivider, shortdivider.len, moreSendFlags) != Fail
+  if chunk.len == 0:      # a zero-length chunk would terminate the stream
+    return true
+  var buf = chunk.len.toHex.strip(trailing = false, chars = {'0'})
+  buf.add shortdivider
+  buf.add chunk
+  buf.add shortdivider
+  ctx.writeToSocket(buf, moreSendFlags) != Fail
 
 proc replyFinishChunked*(ctx: HttpContext): bool {.flow.} =
-  let delimiter = "0" & longdivider
-  if ctx.writeToSocket(delimiter, delimiter.len, lastSendFlags) == Fail:
-    return false
-  ctx.replyFinish() != Fail
+  ctx.writeToSocket("0" & longdivider, lastSendFlags) != Fail
 
 proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
   closeHttpSocket(ctx, cause, msg)
