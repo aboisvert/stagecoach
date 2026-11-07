@@ -137,7 +137,7 @@ stagecoach/stagedispatcher.nim
 tests/t_parser.nim
 ```
 
-### Phase 2: Close-cause cleanup and signal-safety basics
+### ✅ Phase 2: Close-cause cleanup and signal-safety basics
 
 **Today**
 
@@ -161,7 +161,10 @@ matches).
 - Dead imports removed (`osproc` in the dispatcher).
 
 ```changes
-
+132d411
+stagecoach/coachserver.nim
+stagecoach/stagedispatcher.nim
+stagecoach/httpservercore.nim
 ```
 
 ### Phase 3: One socket-IO home
