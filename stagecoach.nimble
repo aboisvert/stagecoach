@@ -25,3 +25,6 @@ task httptest, "Compile and run examples/httptest.nim":
 
 task asynchandler, "Compile and run examples/asynchandler.nim":
   compileAndRunExample("asynchandler")
+
+task querybench, "Compile and run examples/querybench.nim":
+  compileAndRunExample("querybench")

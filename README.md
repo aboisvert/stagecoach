@@ -57,8 +57,11 @@ See [`examples/`](examples/):
 | [`getandpost.nim`](examples/getandpost.nim) | `nimble getandpost` |
 | [`httptest.nim`](examples/httptest.nim) | `nimble httptest` |
 | [`asynchandler.nim`](examples/asynchandler.nim) | `nimble asynchandler` |
+| [`querybench.nim`](examples/querybench.nim) | `nimble querybench` |
 
 Load test (with helloworld on 8080): `./load-test.sh`
+
+Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs it, then `hey`): `./query-bench.sh`. Override load with `REQUESTS` or `CONCURRENCY` (defaults match `load-test.sh`: 20000 requests, 200 concurrent).
 
 ## API overview
 
