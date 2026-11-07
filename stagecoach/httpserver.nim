@@ -5,8 +5,8 @@ from std/posix import recv, EAGAIN, EWOULDBLOCK, close, SocketHandle, INVALID_SO
 import httpcore
 export httpcore
 export strtabs
-import guildenserver
-export guildenserver
+import coachserver
+export coachserver
 import stagelane/core
 import stagelane/sched
 export sched.CancelledError
@@ -39,7 +39,7 @@ type
     Progress = 1
     Complete = 2
 
-  HttpServerObj* = object of GuildenServerObj
+  HttpServerObj* = object of StagecoachServerObj
     contenttype*: ContentType
     maxheaderlength*: int64
     bufferlength*: int64

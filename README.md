@@ -1,21 +1,25 @@
-# GuildenStern
+# Stagecoach
 
-HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime. **M** worker threads each run a stagelane event loop; each accepted connection is a flow task. You can run several `HttpServer` instances on different ports (for example a modular monolith behind a reverse proxy).
+HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime — a play on **stagelane** plus **transport** (like a stagecoach carrying requests).
+
+> **Experimental:** This library is experimental; APIs and behavior may change without notice. It is based on [GuildenStern](https://github.com/olliNiinivaara/GuildenStern), the Nim HTTP server framework, ported to run on stagelane (async runtime) instead of the original thread-per-request dispatchers.
+
+**M** worker threads each run a stagelane event loop; each accepted connection is a flow task. You can run several `HttpServer` instances on different ports (for example a modular monolith behind a reverse proxy).
 
 This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-request dispatchers were removed in favor of stagelane.
 
 ## Requirements
 
 - Nim ≥ 2.2.0
-- [stagelane](https://github.com/ghazalialshafi/stagelane) (see `guildenstern.nimble`; local path in [`config.nims`](config.nims))
+- [stagelane](https://github.com/ghazalialshafi/stagelane) (see `stagecoach.nimble`; local path in [`config.nims`](config.nims))
 - Build with `--threads:on` (Nim default for your config)
 
-Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`guildenstern/flow`](guildenstern/flow.nim) in application code so `{.flow.}` works in your modules.
+Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/flow`](stagecoach/flow.nim) in application code so `{.flow.}` works in your modules.
 
 ## Quick start
 
 ```nim
-import guildenstern/[flow, httpserver]
+import stagecoach/[flow, httpserver]
 
 proc handle(ctx: HttpContext) {.flow.} =
   ctx.reply("hello world")
@@ -50,9 +54,9 @@ Load test (with helloworld on 8080): `./load-test.sh`
 
 ## API overview
 
-- [`guildenstern/httpserver`](guildenstern/httpserver.nim) — `HttpContext`, `newHttpServer`, `serve` / `wait`, request helpers (`getUri`, `readBodyChunk`, …), `reply` / chunked replies
-- [`guildenstern/guildenserver`](guildenstern/guildenserver.nim) — logging, `shutdown()`, close causes
-- [`guildenstern/flow`](guildenstern/flow.nim) — stagelane `{.flow.}` support for your handlers
+- [`stagecoach/httpserver`](stagecoach/httpserver.nim) — `HttpContext`, `newHttpServer`, `serve` / `wait`, request helpers (`getUri`, `readBodyChunk`, …), `reply` / chunked replies
+- [`stagecoach/coachserver`](stagecoach/coachserver.nim) — logging, `shutdown()`, close causes
+- [`stagecoach/flow`](stagecoach/flow.nim) — stagelane `{.flow.}` support for your handlers
 
 ## Release notes, 9.0.3 (stagelane port)
 
@@ -65,8 +69,8 @@ Load test (with helloworld on 8080): `./load-test.sh`
 <details>
 <summary>9.0.2 – 9.0.0</summary>
 
-- **9.0.2** — content-length buffer / Boyer–Moore header search fixes  
-- **9.0.1** — chunked response and NODELAY fixes  
+- **9.0.2** — content-length buffer / Boyer–Moore header search fixes
+- **9.0.1** — chunked response and NODELAY fixes
 - **9.0.0** — `std/logging` `Level`; various dispatcher and websocket API changes (websocket since removed on this branch)
 
 </details>

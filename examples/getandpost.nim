@@ -1,11 +1,11 @@
-import cgi, guildenstern/[flow, httpserver]
+import cgi, stagecoach/[flow, httpserver]
 
 proc handleGet(ctx: HttpContext) {.flow.} =
   if ctx.isUri("/favicon.ico"):
     ctx.replyHeaders(Http204, [])
   else:
     ctx.reply """
-      <!doctype html><title>GuildenStern Example</title><body>
+      <!doctype html><title>Stagecoach Example</title><body>
       <form action="http://localhost:5051" method="post" accept-charset="utf-8">
       <input name="say" value="Hi"><button>Send"""
 

@@ -1,12 +1,12 @@
 ---
-name: GuildenStern on stagelane
-overview: Replace GuildenStern's thread-per-request dispatchers and the asyncdispatch pending-reply workaround with an M:N runtime. M worker threads each run their own stagelane event loop, with an accept-loop task and one flow task per connection. Handlers become `{.flow.}` procs that take an explicit `HttpContext`. Back-pressure comes from per-worker connection and in-flight limits.
+name: Stagecoach on stagelane
+overview: Replace Stagecoach's thread-per-request dispatchers and the asyncdispatch pending-reply workaround with an M:N runtime. M worker threads each run their own stagelane event loop, with an accept-loop task and one flow task per connection. Handlers become `{.flow.}` procs that take an explicit `HttpContext`. Back-pressure comes from per-worker connection and in-flight limits.
 todos:
   - id: spike
     content: "Spike: a template-generated flow proc calling a handler symbol, a shared listener fd across worker selectors, gcsafe from a thread proc, plus dependency/config.nims path setup"
     status: completed
   - id: core-trim
-    content: Strip guildenserver.nim down to config/logging/shutdown; delete the old dispatchers, epoll, and selectors modules
+    content: Strip coachserver.nim down to config/logging/shutdown; delete the old dispatchers, epoll, and selectors modules
     status: completed
   - id: dispatcher
     content: "Write stagedispatcher.nim: worker threads with run, listeners (SO_REUSEPORT on Linux, shared fd elsewhere), acceptLoop with a connection Semaphore, in-flight Semaphore, buffer pool, timeout timer, shutdown pipe and watcher, and the start template"
@@ -23,7 +23,7 @@ todos:
 isProject: false
 ---
 
-# GuildenStern on stagelane (M:N)
+# Stagecoach on stagelane (M:N)
 
 ## Is the design viable?
 
@@ -77,11 +77,11 @@ server.join()
 
 ## Files
 
-- [guildenstern/guildenserver.nim](guildenstern/guildenserver.nim): reduce to config, logging, `shuttingdown`/`shutdown()`, and `SocketCloseCause`. Remove the pending-slot machinery, the `socketcontext` threadvar, `suspend`, flags, the deferred callbacks, and `registerSocket`.
-- New `guildenstern/stagedispatcher.nim`: workers, listener(s), `acceptLoop`, the limits, the timeout timer, the buffer pool, shutdown pipes, and the `start` template.
-- [guildenstern/httpserver.nim](guildenstern/httpserver.nim), [guildenstern/httprequest.nim](guildenstern/httprequest.nim), [guildenstern/httpresponse.nim](guildenstern/httpresponse.nim): switch to `ctx` parameters and turn `receiveHeader`, `receiveToSingleBuffer`, and `writeToSocket` into flow procs. Replace the backoff/`suspend` loops with `waitReadable`/`waitWritable`. Assemble the status line and headers into one buffer, so a reply is one or two sends.
-- Delete `dispatcher.nim`, `epolldispatcher.nim`, `epoll.nim`, and `guildenselectors.nim`. Update [guildenstern.nim](guildenstern.nim).
-- [guildenstern.nimble](guildenstern.nimble): `requires "nim >= 2.2.0"` and `requires "https://github.com/ghazalialshafi/stagelane"`. For local development, use a `--path:/Users/alexboisvert/nim/stagelane/src` override in [config.nims](config.nims).
+- [stagecoach/coachserver.nim](stagecoach/coachserver.nim): reduce to config, logging, `shuttingdown`/`shutdown()`, and `SocketCloseCause`. Remove the pending-slot machinery, the `socketcontext` threadvar, `suspend`, flags, the deferred callbacks, and `registerSocket`.
+- New `stagecoach/stagedispatcher.nim`: workers, listener(s), `acceptLoop`, the limits, the timeout timer, the buffer pool, shutdown pipes, and the `start` template.
+- [stagecoach/httpserver.nim](stagecoach/httpserver.nim), [stagecoach/httprequest.nim](stagecoach/httprequest.nim), [stagecoach/httpresponse.nim](stagecoach/httpresponse.nim): switch to `ctx` parameters and turn `receiveHeader`, `receiveToSingleBuffer`, and `writeToSocket` into flow procs. Replace the backoff/`suspend` loops with `waitReadable`/`waitWritable`. Assemble the status line and headers into one buffer, so a reply is one or two sends.
+- Delete `dispatcher.nim`, `epolldispatcher.nim`, `epoll.nim`, and `guildenselectors.nim`. Update [stagecoach.nim](stagecoach.nim).
+- [stagecoach.nimble](stagecoach.nimble): `requires "nim >= 2.2.0"` and `requires "https://github.com/ghazalialshafi/stagelane"`. For local development, use a `--path:/Users/alexboisvert/nim/stagelane/src` override in [config.nims](config.nims).
 - Examples: port `helloworld`, `httptest`, and `getandpost`. Replace `asyncpending.nim` with `asynchandler.nim`, which uses `delay` and small limits so back-pressure is visible.
 
 ## Risks to check early (spike)

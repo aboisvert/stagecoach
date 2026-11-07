@@ -1,5 +1,5 @@
 import std/times
-import guildenstern/[flow, httpserver]
+import stagecoach/[flow, httpserver]
 import stagelane/sched
 
 var inflight = 0

@@ -3,7 +3,7 @@ name: Pending HTTP replies
 overview: Allow an HttpServer to defer a response with replyPending(), return to the dispatcher, and accept more requests until a configured cap of N outstanding replies. Add an asyncdispatch example that runs two of those replies concurrently.
 todos:
   - id: server-slot
-    content: Add pending-slot state, acquire/release, and the deferred-request flag on GuildenServer / handleRead
+    content: Add pending-slot state, acquire/release, and the deferred-request flag on StagecoachServer / handleRead
     status: completed
   - id: reply-pending
     content: Add PendingReply, replyPending(), and withPending() so later reply() variants write to the captured socket
@@ -21,7 +21,7 @@ isProject: false
 
 ## Behavior
 
-Today a worker calls [`handleRead`](guildenstern/guildenserver.nim), the handler must `reply()` before returning, and only then does the dispatcher re-arm that socket. [`socketcontext`](guildenstern/guildenserver.nim) is a threadvar, so the next request on that worker reuses the same buffer.
+Today a worker calls [`handleRead`](stagecoach/coachserver.nim), the handler must `reply()` before returning, and only then does the dispatcher re-arm that socket. [`socketcontext`](stagecoach/coachserver.nim) is a threadvar, so the next request on that worker reuses the same buffer.
 
 New flow:
 
@@ -45,7 +45,7 @@ sequenceDiagram
 
 ## API
 
-In [`guildenstern/httpresponse.nim`](guildenstern/httpresponse.nim) (included by the http server):
+In [`stagecoach/httpresponse.nim`](stagecoach/httpresponse.nim) (included by the http server):
 
 - `replyPending(): PendingReply` captures the current socket and server and sets a threadvar so the dispatcher keeps the slot. The handler must copy anything it still needs (`getUri()` / `getBody()` already return copies) and then return without calling `reply()`.
 - `withPending(pending, body)` installs that socket as the current `socketcontext` on whatever thread runs it, runs `body` so the existing `reply()` variants work unchanged, then always re-arms the socket and releases the slot.
@@ -54,12 +54,12 @@ In [`guildenstern/httpresponse.nim`](guildenstern/httpresponse.nim) (included by
 
 ## Dispatcher gate
 
-Add `maxPendingRequests`, a lock, a condition variable, and `pendingCount` to [`GuildenServerObj`](guildenstern/guildenserver.nim), plus `acquirePendingSlot` / `releasePendingSlot` and a `requestDeferred` threadvar cleared at the start of `handleRead`. `suspend` will adjust the active-thread count only on dispatcher worker threads, because a deferred `reply()` can run elsewhere and may call `suspend` if a write blocks.
+Add `maxPendingRequests`, a lock, a condition variable, and `pendingCount` to [`StagecoachServerObj`](stagecoach/coachserver.nim), plus `acquirePendingSlot` / `releasePendingSlot` and a `requestDeferred` threadvar cleared at the start of `handleRead`. `suspend` will adjust the active-thread count only on dispatcher worker threads, because a deferred `reply()` can run elsewhere and may call `suspend` if a write blocks.
 
 Both dispatchers enforce the cap, since either one can run an `HttpServer`:
 
-- [`guildenstern/dispatcher.nim`](guildenstern/dispatcher.nim): around `handleRead` in `workerthreadLoop`. If the handler deferred, skip `restoreRead`. Completion calls a small server callback that does the same re-arm (`isprocessing = false`, read interest restored).
-- [`guildenstern/epolldispatcher.nim`](guildenstern/epolldispatcher.nim): same reserve/release around each `handleRead`. If the handler deferred, leave `processing` set and leave the read loop so that socket is not drained again. Completion clears `processing`.
+- [`stagecoach/dispatcher.nim`](stagecoach/dispatcher.nim): around `handleRead` in `workerthreadLoop`. If the handler deferred, skip `restoreRead`. Completion calls a small server callback that does the same re-arm (`isprocessing = false`, read interest restored).
+- [`stagecoach/epolldispatcher.nim`](stagecoach/epolldispatcher.nim): same reserve/release around each `handleRead`. If the handler deferred, leave `processing` set and leave the read loop so that socket is not drained again. Completion clears `processing`.
 
 `acquirePendingSlot` also wakes on shutdown so a blocked worker cannot stick during `shutdown()`.
 

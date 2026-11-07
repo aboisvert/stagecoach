@@ -1,4 +1,4 @@
-import guildenstern/[flow, httpserver]
+import stagecoach/[flow, httpserver]
 
 proc handle(ctx: HttpContext) {.flow.} =
   ctx.reply("hello world")

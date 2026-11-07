@@ -2,9 +2,9 @@ import std/[strutils, os]
 from std/posix import recv, MSG_PEEK, EAGAIN, EWOULDBLOCK
 import std/logging
 import stagelane/sched
-from guildenserver import GuildenServer, SocketCloseCause, shuttingdown, closeSocket
+from coachserver import StagecoachServer, SocketCloseCause, shuttingdown, closeSocket
 
-proc classifyRecv*(ret: int, server: GuildenServer, ctx: HttpContext): SocketState =
+proc classifyRecv*(ret: int, server: StagecoachServer, ctx: HttpContext): SocketState =
   if unlikely(shuttingdown): return Fail
   if likely(ret > 0): return Progress
   if unlikely(ret == 0): return TryAgain

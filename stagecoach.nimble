@@ -1,12 +1,12 @@
-version       = "9.0.3"
-author        = "Olli"
+version       = "0.1"
+author        = "Alex Boisvert"
 description   = "HTTP/1.1 server on the stagelane M:N async runtime (HTTP only on this branch)"
 license       = "MIT"
 
 skipDirs = @["examples"]
 
 binDir = "bin"
-bin = @["guildenstern"]
+bin = @["stagecoach"]
 
 requires "nim >= 2.2.0"
 requires "https://github.com/ghazalialshafi/stagelane"

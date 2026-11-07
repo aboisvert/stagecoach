@@ -1,4 +1,4 @@
-import guildenstern/[flow, httpserver]
+import stagecoach/[flow, httpserver]
 
 proc handleHttpRequest(ctx: HttpContext) {.flow.} =
   let body = "replyfromport" & $(ctx.server.port)
@@ -14,7 +14,7 @@ proc handleHttpRequest(ctx: HttpContext) {.flow.} =
     else:
       ctx.reply(body)
 
-proc onCloseSocket(server: GuildenServer, socket: SocketHandle, cause: SocketCloseCause, msg: string) =
+proc onCloseSocket(server: StagecoachServer, socket: SocketHandle, cause: SocketCloseCause, msg: string) =
   echo "closing socket ", socket, " due to ", cause, " ", msg
 
 echo "Starting at ports 8070, 8071"

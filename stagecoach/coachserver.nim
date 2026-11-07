@@ -1,4 +1,4 @@
-const GuildenSternVersion* = "9.0.3"
+const StagecoachVersion* = "9.0.3"
 
 import std/logging
 from std/posix import SocketHandle, INVALID_SOCKET, SIGINT, SIGTERM, onSignal, `==`, close
@@ -25,9 +25,9 @@ type
     DontClose
 
   LogCallback* = proc(loglevel: Level, source: string, message: string) {.gcsafe, nimcall, raises: [].}
-  OnCloseSocketCallback* = proc(server: GuildenServer, socket: SocketHandle, cause: SocketCloseCause, msg: string) {.gcsafe, nimcall, raises: [].}
+  OnCloseSocketCallback* = proc(server: StagecoachServer, socket: SocketHandle, cause: SocketCloseCause, msg: string) {.gcsafe, nimcall, raises: [].}
 
-  GuildenServerObj* {.inheritable.} = object
+  StagecoachServerObj* {.inheritable.} = object
     port*: uint16
     id*: int
     name*: string
@@ -36,7 +36,7 @@ type
     started*: bool
     onCloseSocketCallback*: OnCloseSocketCallback
 
-  GuildenServer* = ptr GuildenServerObj
+  StagecoachServer* = ptr StagecoachServerObj
 
 var
   shuttingdown* = false
@@ -56,18 +56,18 @@ onSignal(SIGTERM): shutdown()
 onSignal(SIGINT): shutdown()
 {.hint[XDeclaredButNotUsed]: on.}
 
-template log*(theserver: GuildenServer, level: Level, message: string) =
+template log*(theserver: StagecoachServer, level: Level, message: string) =
   if unlikely(int(level) >= int(theserver.loglevel)):
     if likely(not isNil(theserver.logCallback)):
       var s = theserver.name & "-" & $getThreadId()
       theserver.logCallback(level, s, message)
 
-template log*(theserver: GuildenServer, level: Level, source: string, message: string) =
+template log*(theserver: StagecoachServer, level: Level, source: string, message: string) =
   if unlikely(int(level) >= int(theserver.loglevel)):
     if likely(not isNil(theserver.logCallback)):
       theserver.logCallback(level, source, message)
 
-proc initialize*(server: GuildenServer, loglevel: Level) =
+proc initialize*(server: StagecoachServer, loglevel: Level) =
   server.id = nextid
   nextid += 1
   server.loglevel = loglevel
@@ -81,7 +81,7 @@ proc initialize*(server: GuildenServer, loglevel: Level) =
         let excerpt = message[0 .. 49] & " ... (" & $(message.len - 100) & " chars omitted) ... " & message[(message.len - 50) .. (message.len - 1)]
         echo LogColors[level.int], level, "\e[0m ", source, " ", excerpt.replace("\n", "\\n ")
 
-proc logClose*(server: GuildenServer, socket: SocketHandle, cause = CloseCalled, msg: string) =
+proc logClose*(server: StagecoachServer, socket: SocketHandle, cause = CloseCalled, msg: string) =
   let level =
     if cause in [CloseCalled, AlreadyClosed, ClosedbyClient]: lvlDebug
     elif cause in [ConnectionLost, TimedOut]: lvlInfo
@@ -90,7 +90,7 @@ proc logClose*(server: GuildenServer, socket: SocketHandle, cause = CloseCalled,
     else: lvlError
   server.log(level, "socket " & $socket & " " & $cause & ": " & msg)
 
-proc closeSocket*(server: GuildenServer, socket: SocketHandle, cause = CloseCalled, msg = "") =
+proc closeSocket*(server: StagecoachServer, socket: SocketHandle, cause = CloseCalled, msg = "") =
   if socket == INVALID_SOCKET: return
   logClose(server, socket, cause, msg)
   if not isNil(server.onCloseSocketCallback):

@@ -1,6 +1,6 @@
 import std/[strutils, strformat, os]
 import stagelane/sched
-from guildenserver import GuildenServer, SocketCloseCause, shuttingdown, closeSocket
+from coachserver import StagecoachServer, SocketCloseCause, shuttingdown, closeSocket
 from posix import send, MSG_NOSIGNAL, EAGAIN, EWOULDBLOCK
 import httpcore
 
@@ -18,7 +18,7 @@ let
   contentlen = "Content-Length: "
   zerocontent = "Content-Length: 0\c\L"
 
-proc classifySend(ret: int, server: GuildenServer, ctx: HttpContext): SocketState =
+proc classifySend(ret: int, server: StagecoachServer, ctx: HttpContext): SocketState =
   if unlikely(shuttingdown): return Fail
   if likely(ret > 0): return Progress
   let lastError = osLastError().int
