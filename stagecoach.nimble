@@ -30,3 +30,4 @@ task querybench, "Compile and run examples/querybench.nim":
 task test, "Run stagecoach tests":
   exec "nim c -r --hints:off tests/t_parser.nim"
   exec "nim c -r --hints:off tests/t_socket.nim"
+  exec "nim c -r --hints:off tests/t_stop.nim"

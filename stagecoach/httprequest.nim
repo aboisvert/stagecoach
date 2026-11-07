@@ -256,7 +256,7 @@ proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   var t0 = getMonoTime()
   var started = ctx.requestlen > 0      # the clock starts at the first byte
   while true:
-    if isShuttingDown():
+    if not serverIsOpen(server):
       return false
     let limit = min(1 + server.maxheaderlength, ctx.request.len.int64)
     let maxRead = (limit - ctx.requestlen).int
@@ -299,7 +299,7 @@ proc receiveToSingleBuffer*(ctx: HttpContext, server: HttpServer): bool {.flow.}
     return true
   let t0 = getMonoTime()
   while ctx.contentreceived < ctx.contentlength:
-    if isShuttingDown():
+    if not serverIsOpen(server):
       return false
     let need = ctx.contentlength - ctx.contentreceived
     let position = ctx.bodystart + ctx.contentreceived
@@ -327,7 +327,7 @@ proc readBodyChunk*(ctx: HttpContext, server: HttpServer): (SocketState, string)
     return (Progress, chunk)
   if avail >= ctx.contentlength:
     return (Complete, "")
-  if isShuttingDown():
+  if not serverIsOpen(server):
     return (Fail, "")
   if ctx.streamScratch.len == 0:
     ctx.streamScratch = newString(server.bufferlength.int)

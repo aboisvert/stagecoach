@@ -1,6 +1,6 @@
 ## Shared HTTP server types and constants (no request/response I/O).
 
-import std/[strtabs, logging, strutils]
+import std/[strtabs, logging, strutils, atomics]
 import stagelane/net
 import coachserver
 export coachserver
@@ -36,6 +36,7 @@ type
   WorkerIdx* = object
     runtime*: HttpRuntime
     idx*: int
+    nThreads*: int
 
   HttpRuntime* = ref object
     ## Per-`serve` state: one listener and shutdown pipe per worker thread.
@@ -44,6 +45,8 @@ type
     shutdownPipes*: seq[(cint, cint)]   # (write end, read end)
     listeners*: seq[TcpListener]        # per-worker (SO_REUSEPORT) when non-empty
     sharedListener*: TcpListener
+    stopping*: Atomic[bool]             ## this runtime's stop() was requested
+    drainms*: int                       ## stop(): force-cancel connections after this window
 
   HttpContext* = ref object of RootObj
     server*: HttpServer
@@ -69,6 +72,15 @@ type
 const
   MSG_DONTWAIT* = when defined(macosx): 0x80.cint else: 0x40.cint
   MSG_MORE* = when defined(linux): 0x8000.cint else: 0.cint
+
+proc serverIsStopping*(server: HttpServer): bool {.inline.} =
+  #= True once `stop` (or a process signal) targets this server.
+  server.runtime != nil and server.runtime.stopping.load(moRelaxed)
+
+proc serverIsOpen*(server: HttpServer): bool {.inline.} =
+  ## The server accepts and serves work: neither process shutdown nor a
+  ## per-server stop is in effect.
+  not isShuttingDown() and not serverIsStopping(server)
 
 proc initHttpServer*(s: HttpServer, loglevel: Level, parserequestline: bool,
                     contenttype: ContentType, headerfields: openArray[string]) =

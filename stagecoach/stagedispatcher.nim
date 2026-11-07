@@ -1,14 +1,22 @@
 ## Runtime plumbing for `serve`: listeners, shutdown pipes, per-request steps.
 ## Only the handler-dependent glue lives in the `serve` template (flow procs
 ## need a static call to the handler).
+##
+## Worker thread layout (per worker):
+##   workerMain
+##   ├── acceptLoop      owns `listener.accept()`; spawns into `conns`
+##   ├── acceptWatcher   wakes on the runtime's stop pipe; cancels acceptLoop
+##   └── conns (Scope)   every accepted connection's task
+## stop() pokes the pipes; acceptLoop exits; workerMain lets connection tasks
+## finish naturally for `drainms` and force-cancels whatever is left.
 
-import std/[posix, os, nativesockets, osproc, logging]
+import std/[posix, os, nativesockets, osproc, logging, atomics]
 import stagelane/core
 import stagelane/sched
 import stagelane/net
 import stagelane/sync
 import stagelane/transform
-import httpservercore, httprequest
+import httpservercore, httprequest, socketio
 from coachserver import shutdownCallbacks, isShuttingDown, log
 export httpservercore
 
@@ -61,6 +69,8 @@ const defaultConnLimit* = 1024
 const defaultInflightLimit* = 64
 
 proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: int): HttpRuntime =
+  ## Builds the runtime for one `serve` call. Re-runnable: a previous run's
+  ## resources are torn down again in `wait`.
   if srv.maxheaderlength > srv.bufferlength:
     raise newException(ValueError, "maxheaderlength must not exceed bufferlength")
   srv.osThreads = nThreads
@@ -92,9 +102,12 @@ proc newWorker*(rt: HttpRuntime, nThreads: int): Worker =
 proc listenerFor*(rt: HttpRuntime, idx: int): TcpListener =
   if idx < rt.listeners.len: rt.listeners[idx] else: rt.sharedListener
 
-proc shutdownAcceptWatcher*(shutdownRfd: cint, victim: typeof(curTask())) {.flow.} =
+proc acceptWatcher*(shutdownRfd: cint, victim: TaskBase) {.flow.} =
+  ## Wakes once on a write to this worker's shutdown pipe, then cancels the
+  ## accept loop so it stops blocking on `listener.accept()`. Connection tasks
+  ## are NOT cancelled here: the worker's drain logic owns them.
   if not isShuttingDown():
-    waitReadable(shutdownRfd)             # wakes on a poke, cancel, or hang-up
+    waitReadable(shutdownRfd)
     var dummy: array[16, char]
     discard posix.read(shutdownRfd, addr dummy[0], 16)
   cancel(victim)
@@ -104,6 +117,8 @@ proc beginRequest*(ctx: HttpContext): bool {.flow.} =
   ## Returns false when the connection should be dropped (socket already closed
   ## if that was due to an error).
   let s = ctx.server
+  if not serverIsOpen(s):
+    return false
   ctx.prepareHttpContext(s)
   if not ctx.readHeader(s):
     return false
@@ -115,7 +130,7 @@ proc beginRequest*(ctx: HttpContext): bool {.flow.} =
 
 proc endRequest*(ctx: HttpContext): bool =
   ## Post-handler bookkeeping: false means "stop serving this connection".
-  if ctx.socket == INVALID_SOCKET or isShuttingDown() or not ctx.keepAlive:
+  if ctx.socket == INVALID_SOCKET or not serverIsOpen(ctx.server) or not ctx.keepAlive:
     return false
   # A partially consumed Streaming body leaves its unread tail in the socket:
   # keep-alive here would misparse the tail as the next request. (Compact
@@ -128,11 +143,46 @@ proc endRequest*(ctx: HttpContext): bool =
   ctx.recordCarry(ctx.server)
   true
 
+proc stop*(srv: HttpServer, drainms = 10_000) =
+  ## Stop this server (not the process): stop accepting, then let connection
+  ## tasks finish for `drainms` milliseconds; whatever is still alive after
+  ## that window is force-cancelled (0 = cancel immediately). Callers block on
+  ## `wait(srv)` to join the worker threads.
+  let rt = srv.runtime
+  if rt.isNil or rt.stopping.load(moRelaxed):
+    return
+  rt.drainms = drainms
+  rt.stopping.store(true, moRelease)
+  for (wfd, _) in rt.shutdownPipes:
+    var b: array[1, char] = ['x']
+    discard write(wfd, addr b[0], 1)
+
+proc teardownRuntime(srv: HttpServer) =
+  ## Frees the runtime's descriptors and registry entry after its threads
+  ## joined. Makes the same `HttpServer` reusable with a fresh `serve` call.
+  let rt = srv.runtime
+  if rt.isNil:
+    return
+  for (wfd, rfd) in rt.shutdownPipes:
+    discard posix.close(wfd)
+    discard posix.close(rfd)
+  for l in rt.listeners:
+    discard posix.close(l.fd)
+  if not rt.sharedListener.isNil:
+    discard posix.close(rt.sharedListener.fd)
+  for i, cand in httpRuntimes:
+    if cand == rt:
+      httpRuntimes.delete(i)
+      break
+  srv.runtime = nil
+  srv.started = false
+
 proc joinRuntime*(srv: HttpServer) =
   let rt = srv.runtime
   if not rt.isNil:
     for i in 0 ..< rt.threads.len:
       joinThread(rt.threads[i])
+    teardownRuntime(srv)
 
 template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
@@ -161,35 +211,51 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         release(w.connSem)
         ctx.closeHttpSocket(CloseCalled, "")
 
-    proc workerAcceptLoop(runtime: HttpRuntime, workerIdx: int) {.flow.} =
-      let s = runtime.httpServer
-      let w = newWorker(runtime, nThreads)
-      let listener = runtime.listenerFor(workerIdx)
-      let acceptLoop = curTask()
-      discard go shutdownAcceptWatcher(runtime.shutdownPipes[workerIdx][1], acceptLoop)
-      scope conns:
-        while not isShuttingDown():
-          acquire(w.connSem)
-          var stream: TcpStream
-          try:
-            stream = listener.accept()
-          except CancelledError:
-            release(w.connSem)
-            raise
-          except CatchableError as e:
-            release(w.connSem)
-            s.log(lvlError, "accept: " & e.msg)
-            delay(50)             # e.g. EMFILE: don't spin
-            continue
-          discard conns.go connectionLoop(stream.fd, w)
+    proc acceptLoop(rt: HttpRuntime, workerIdx: int, w: Worker, conns: Scope) {.flow.} =
+      let s = rt.httpServer
+      let listener = rt.listenerFor(workerIdx)
+      while not isShuttingDown() and not serverIsStopping(s):
+        acquire(w.connSem)
+        var stream: TcpStream
+        try:
+          stream = listener.accept()
+        except CancelledError:
+          release(w.connSem)
+          raise
+        except CatchableError as e:
+          release(w.connSem)
+          s.log(lvlError, "accept: " & e.msg)
+          delay(50)             # e.g. EMFILE: don't spin
+          continue
+        discard conns.go connectionLoop(stream.fd, w)
+
+    proc workerMain(rt: HttpRuntime, workerIdx: int, w: Worker) {.flow.} =
+      let conns = newScope()    # explicit: survives acceptLoop's cancellation
+      let acceptTask = go acceptLoop(rt, workerIdx, w, conns)
+      let watcherTask = go acceptWatcher(rt.shutdownPipes[workerIdx][1], acceptTask)
+      waitDone(acceptTask)
+      # Graceful path: stop() or a process signal cancelled the accept loop.
+      # Bound how long lingering connection tasks may keep draining. `drainms`
+      # on the runtime defaults to 0 = cancel the leftovers immediately (the
+      # signal path); stop(drainms) sets the window explicitly.
+      if rt.stopping.load(moRelaxed) or isShuttingDown():
+        waitDone(watcherTask)
+        let drain = rt.drainms
+        if drain > 0:
+          discard addTimer(drain, proc () {.closure.} =
+            {.cast(gcsafe).}: conns.cancel())
+        else:
+          conns.cancel()
+      joinQuiet(conns)
 
     proc workerThreadMain(w: WorkerIdx) {.thread.} =
       {.cast(gcsafe).}:
-        run workerAcceptLoop(w.runtime, w.idx)
+        let worker = newWorker(w.runtime, w.nThreads)
+        run workerMain(w.runtime, w.idx, worker)
 
     rt.threads.setLen(nThreads)
     for i in 0 ..< nThreads:
-      createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i))
+      createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i, nThreads: nThreads))
 
 template start*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
