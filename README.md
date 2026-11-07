@@ -41,7 +41,7 @@ wait(server)                         # aliases: join(server, ...)
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `numWorkers` | `2 × CPU count`, at least 2 | OS threads running stagelane |
+| `osThreads` | CPU count, at least 1 | OS threads running stagelane |
 | `connLimit` | 1024 | Max connections per worker (split across workers) |
 | `inflightLimit` | 64 | Max requests in handler at once per worker |
 

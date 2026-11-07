@@ -46,7 +46,7 @@ type
     sockettimeoutms*: int
     parserequestline*: bool
     headerfields*: seq[string]
-    workerCount*: int
+    osThreads*: int
     maxConnections*: int
     maxInflight*: int
     runtime*: pointer
@@ -70,7 +70,7 @@ proc initHttpServer*(s: HttpServer, loglevel: Level, parserequestline: bool,
   s.contenttype = contenttype
   s.parserequestline = parserequestline
   s.headerfields = @headerfields
-  s.workerCount = 0
+  s.osThreads = 0
   s.maxConnections = 0
   s.maxInflight = 0
 

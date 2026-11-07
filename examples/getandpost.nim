@@ -15,6 +15,6 @@ proc handlePost(ctx: HttpContext) {.flow.} =
 
 let getserver = newHttpServer(loglevel = lvlInfo, contenttype = NoBody)
 let postserver = newHttpServer(headerfields = ["origin"])
-serve(getserver, 5050, handleGet, numWorkers = 2)
-serve(postserver, 5051, handlePost, numWorkers = 2)
+serve(getserver, 5050, handleGet, osThreads = 2)
+serve(postserver, 5051, handlePost, osThreads = 2)
 wait(getserver)

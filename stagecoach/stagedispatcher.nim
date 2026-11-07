@@ -55,11 +55,15 @@ system.add(shutdownCallbacks, registerShutdownPipes)
 const defaultConnLimit = 1024
 const defaultInflightLimit = 64
 
-template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, numWorkers: int = 0,
+proc storeOsThreadCount(s: HttpServer, n: int) =
+  # Outside the serve template so the field name is not substituted.
+  s.osThreads = n
+
+template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
   block:
-    let nWorkers = if numWorkers > 0: numWorkers else: max(2, 2 * countProcessors())
-    httpSrv.workerCount = nWorkers
+    let nThreads = if osThreads > 0: osThreads else: max(1, countProcessors())
+    storeOsThreadCount(httpSrv, nThreads)
     httpSrv.maxConnections = connLimit
     httpSrv.maxInflight = inflightLimit
     httpSrv.port = uint16(bindPort)
@@ -67,14 +71,14 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, numWorkers
       httpServer: httpSrv,
       useReusePort: when defined(linux): true else: false)
     when defined(linux):
-      for i in 0 ..< nWorkers:
+      for i in 0 ..< nThreads:
         let li = makeListener(bindPort)
         let j = rt.listeners.len
         setLen(rt.listeners, j + 1)
         rt.listeners[j] = li
     else:
       rt.sharedListener = listenTcp(bindPort)
-    for i in 0 ..< nWorkers:
+    for i in 0 ..< nThreads:
       var fds: array[2, cint]
       if pipe(fds) != 0:
         raiseOSError(osLastError())
@@ -89,7 +93,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, numWorkers
       httpRuntimes[j] = rt
     httpSrv.runtime = cast[pointer](rt)
     httpSrv.started = true
-    httpSrv.log(lvlInfo, "listening on port " & $bindPort & " with " & $nWorkers & " workers")
+    httpSrv.log(lvlInfo, "listening on port " & $bindPort & " with " & $nThreads & " OS threads")
 
     proc connectionLoop(clientFd: SocketHandle, connSem, inflight: Semaphore) {.flow.} =
       let s = httpSrv
@@ -136,8 +140,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, numWorkers
 
     proc workerAcceptLoop(runtime: HttpRuntime, workerIdx: int) {.flow.} =
       let s = runtime.httpServer
-      let perConn = max(1, (s.maxConnections + s.workerCount - 1) div s.workerCount)
-      let perInflight = max(1, (s.maxInflight + s.workerCount - 1) div s.workerCount)
+      let perConn = max(1, (s.maxConnections + nThreads - 1) div nThreads)
+      let perInflight = max(1, (s.maxInflight + nThreads - 1) div nThreads)
       let connSem = newSemaphore(perConn)
       let inflight = newSemaphore(perInflight)
       let listener =
@@ -164,8 +168,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, numWorkers
       {.cast(gcsafe).}:
         run workerAcceptLoop(w.runtime, w.idx)
 
-    rt.threads.setLen(nWorkers)
-    for i in 0 ..< nWorkers:
+    rt.threads.setLen(nThreads)
+    for i in 0 ..< nThreads:
       createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i))
 
 template start* = serve

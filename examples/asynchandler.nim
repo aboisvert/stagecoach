@@ -13,5 +13,5 @@ proc handle(ctx: HttpContext) {.flow.} =
 
 echo "Listening on http://localhost:8090 (maxInflight=2 per worker pool)"
 let server = newHttpServer(loglevel = lvlInfo)
-serve(server, 8090, handle, numWorkers = 2, inflightLimit = 2)
+serve(server, 8090, handle, osThreads = 2, inflightLimit = 2)
 wait(server)

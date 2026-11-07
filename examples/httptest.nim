@@ -22,6 +22,6 @@ var server0 = newHttpServer(loglevel = lvlAll, headerfields = ["connection"])
 var server1 = newHttpServer(loglevel = lvlAll, headerfields = ["connection"])
 server0.onCloseSocketCallback = onCloseSocket
 server1.onCloseSocketCallback = onCloseSocket
-serve(server0, 8070, handleHttpRequest, numWorkers = 2)
-serve(server1, 8071, handleHttpRequest, numWorkers = 4)
+serve(server0, 8070, handleHttpRequest, osThreads = 2)
+serve(server1, 8071, handleHttpRequest, osThreads = 4)
 wait(server0)
