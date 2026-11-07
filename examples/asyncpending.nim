@@ -1,40 +1,50 @@
-import std/[atomics, strutils, times]
+import std/[atomics, times, os]
 import asyncdispatch
 import guildenstern/[dispatcher, httpserver]
 
-type Job = object
-  pending: PendingReply
-  uri: string
+type AsyncRequest = object
   id: int
+  pending: PendingReply
 
-var jobId: Atomic[int]
-var jobs: Channel[Job]
+var
+  requestId: Atomic[int]
+  requestChan: Channel[AsyncRequest]
 
-proc finishJob(job: Job) {.async.} =
-  echo getTime(), " async start job ", job.id, " uri=", job.uri
-  await sleepAsync(50)
-  withPending(job.pending, proc() =
-    reply("async reply for " & job.uri & " (job " & $job.id & ")"))
-  echo getTime(), " async done job ", job.id
+proc runAsyncRequest(request: AsyncRequest) {.async.} =
+  echo getTime(), " async start request ", request.id
+  await sleepAsync(200)
+  withPending(request.pending, proc() =
+    reply("async reply for " & $request.id))
+  echo getTime(), " async done request ", request.id
 
 proc asyncLoop() {.thread, gcsafe.} =
-  while true:
-    if shuttingdown:
-      break
-    let job = jobs.recv()
-    waitFor finishJob(job)
+  # This thread owns the only dispatcher that is polled. Futures scheduled
+  # anywhere else never resume, because asyncdispatch state is thread-local.
+  while not shuttingdown:
+    let (ok, request) = requestChan.tryRecv()
+    if ok:
+      asyncCheck runAsyncRequest(request)
+      continue
+    try:
+      poll(200)
+    except ValueError:
+      # poll raises until this dispatcher has a timer or handle registered.
+      sleep(20)
 
-proc handleRequest() =
-  let id = jobId.fetchAdd(1) + 1
-  let uri = getUri()
+proc handleRequest() {.gcsafe, raises: [].} =
+  let id = requestId.fetchAdd(1) + 1
   let pending = replyPending()
-  echo getTime(), " handler accepted job ", id, " uri=", uri, " (pending)"
-  jobs.send(Job(pending: pending, uri: uri, id: id))
+  requestChan.send(AsyncRequest(id: id, pending: pending))
+  echo getTime(), " handler accepted request ", id, " (pending)"
+
+requestChan.open()
 
 echo "Listening on http://localhost:8090 (max 2 concurrent pending replies)"
-jobs.open()
-var asyncThread: Thread[void]
-createThread(asyncThread, asyncLoop)
 let server = newHttpServer(handleRequest, loglevel = lvlInfo, maxPendingRequests = 2)
 server.start(8090, threadpoolsize = 4, maxactivethreadcount = 4)
+
+var asyncThread: Thread[void]
+createThread(asyncThread, asyncLoop)
+
 joinThread(server.thread)
+joinThread(asyncThread)
