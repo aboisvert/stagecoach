@@ -342,7 +342,7 @@ Landed in 2443e16: the body clock lives in `HttpContext`
 [[2443e16:stagecoach/httpservercore.nim#L79-L80]] (reset per request),
 `readHeader` starts it when body bytes accompany the header, and
 `receiveToSingleBuffer` [[2443e16:stagecoach/httprequest.nim#L303-L322]] and
-`readBodyChunk` [[2443e16:stagecoach/httprequest.nim#L324-L384]] share it —
+`readBodyChunk` [[2443e16:stagecoach/httprequest.nim#L324-L360]] share it —
 the total body *receive* time is the bound; handler time never counts.
 Streaming test server + 3 tests (fast / dribble / stall) landed as
 `tests/support_stream.nim` / `tests/t_stream.nim`. One test-harness lesson
