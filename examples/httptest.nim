@@ -1,27 +1,27 @@
-import guildenstern/[dispatcher, httpserver]
+import guildenstern/[flow, httpserver]
 
-proc handleHttpRequest*() =
-  let body = "replyfromport" & $(server.port)
-  doAssert getMethod() == "GET"
-  doAssert http.headers.getOrDefault("connection") == "keep-alive"
-  case getUri():
+proc handleHttpRequest(ctx: HttpContext) {.flow.} =
+  let body = "replyfromport" & $(ctx.server.port)
+  doAssert ctx.getMethod() == "GET"
+  doAssert ctx.headers.getOrDefault("connection") == "keep-alive"
+  case ctx.getUri():
     of "/close":
-      reply(Http204)
-      closeSocket()
+      ctx.replyHeaders(Http204, [])
+      ctx.closeSocket()
     of "/stop":
-      let stop = "stop"
-      reply("stop")
+      ctx.reply("stop")
       shutdown()
-    else: reply(body)
+    else:
+      ctx.reply(body)
 
-proc onCloseSocket(server: GuildenServer, socket: SocketHandle, cause: SocketCloseCause, msg: string){.gcsafe, nimcall, raises: [].} =
+proc onCloseSocket(server: GuildenServer, socket: SocketHandle, cause: SocketCloseCause, msg: string) =
   echo "closing socket ", socket, " due to ", cause, " ", msg
 
 echo "Starting at ports 8070, 8071"
-var server0 = newHttpServer(handleHttpRequest, lvlAll, headerfields = ["connection"])
-var server1 = newHttpServer(handleHttpRequest, lvlAll, headerfields = ["connection"])
+var server0 = newHttpServer(loglevel = lvlAll, headerfields = ["connection"])
+var server1 = newHttpServer(loglevel = lvlAll, headerfields = ["connection"])
 server0.onCloseSocketCallback = onCloseSocket
 server1.onCloseSocketCallback = onCloseSocket
-server0.start(8070, 1)
-server1.start(8071, 40)
-joinThreads(server0.thread, server1.thread)
+serve(server0, 8070, handleHttpRequest, numWorkers = 2)
+serve(server1, 8071, handleHttpRequest, numWorkers = 4)
+wait(server0)

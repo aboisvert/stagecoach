@@ -1,16 +1,15 @@
-version       = "9.0.2"
+version       = "9.0.3"
 author        = "Olli"
-description   = "Modular multithreading HTTP/1.1 + WebSocket upstream server framework"
+description   = "HTTP/1.1 server on the stagelane M:N async runtime (HTTP only on this branch)"
 license       = "MIT"
 
-skipDirs = @["docs", "examples"]
+skipDirs = @["examples"]
 
-# `nimble build` compiles binaries listed here. guildenstern.nim imports the
-# library modules, so this compiles the library. Output goes to bin/.
 binDir = "bin"
 bin = @["guildenstern"]
 
-requires "nim >= 2.0.0"
+requires "nim >= 2.2.0"
+requires "https://github.com/ghazalialshafi/stagelane"
 
 proc compileAndRunExample(name: string, flags = "") =
   exec "nim c -r --hints:off --outdir:bin " & flags & " examples/" & name & ".nim"
@@ -24,8 +23,5 @@ task getandpost, "Compile and run examples/getandpost.nim":
 task httptest, "Compile and run examples/httptest.nim":
   compileAndRunExample("httptest")
 
-task asyncpending, "Compile and run examples/asyncpending.nim":
-  compileAndRunExample("asyncpending")
-
-task wsmulticasttest, "Compile and run examples/wsmulticasttest.nim":
-  compileAndRunExample("wsmulticasttest", "-d:release --mm:atomicArc")
+task asynchandler, "Compile and run examples/asynchandler.nim":
+  compileAndRunExample("asynchandler")

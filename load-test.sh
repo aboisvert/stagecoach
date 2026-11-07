@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-hey -n 200 -c 20 http://localhost:8090/
+hey -n 20000 -c 200 http://localhost:8080/

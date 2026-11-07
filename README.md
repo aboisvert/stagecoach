@@ -1,114 +1,72 @@
 # GuildenStern
 
-Modular multithreading HTTP/1.1 + WebSocket upstream server ecosystem for POSIXy OSs (Linux, BSD, MacOS).
-Allows concurrently running multiple servers, making your application more efficient, configurable, and fault-tolerant than sticking to a single web server.
-Splitting work to many servers supports the [modular monolith](https://arxiv.org/pdf/2401.11867) architecture style.
-Out-of-the-box includes two dispatcher implementations and following servers: http, multi-part/form-data, websocket, and websocket client, where the http server has optimized configurations for receiving bodyless, compact and streaming data and for sending in normal and chunked mode.
+HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime. **M** worker threads each run a stagelane event loop; each accepted connection is a flow task. You can run several `HttpServer` instances on different ports (for example a modular monolith behind a reverse proxy).
 
-## Documentation
+This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-request dispatchers were removed in favor of stagelane.
 
-https://olliniinivaara.github.io/GuildenStern/theindex.html
+## Requirements
 
-## Example 1: hello world
+- Nim ≥ 2.2.0
+- [stagelane](https://github.com/ghazalialshafi/stagelane) (see `guildenstern.nimble`; local path in [`config.nims`](config.nims))
+- Build with `--threads:on` (Nim default for your config)
 
-```nim
-import guildenstern/[dispatcher, httpserver]
-let server = newHttpServer(proc() = reply "hello world")
-server.start(8080)
-joinThread(server.thread)
-```
+Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`guildenstern/flow`](guildenstern/flow.nim) in application code so `{.flow.}` works in your modules.
 
-## Example 2: Partitioning work to fine-tuned servers
+## Quick start
 
 ```nim
-import cgi, guildenstern/[dispatcher, epolldispatcher, httpserver]
-     
-proc handleGet() =
-  echo "method: ", getMethod()
-  echo "uri: ", getUri()
-  if isUri("/favicon.ico"): reply(Http204)
-  else:
-    reply """
-      <!doctype html><title>GuildenStern Example</title><body>
-      <form action="http://localhost:5051" method="post" accept-charset="utf-8">
-      <input name="say" value="Hi"><button>Send"""
+import guildenstern/[flow, httpserver]
 
-proc handlePost() =
-  echo "client said: ", readData(getBody()).getOrDefault("say")
-  reply(Http303, ["location: " & http.headers.getOrDefault("origin")])
-  
-let getserver = newHttpServer(handleGet, loglevel = lvlInfo, contenttype = NoBody)
-let postserver = newHttpServer(handlePost, headerfields = ["origin"])
-dispatcher.start(getserver, 5050)
-epolldispatcher.start(postserver, 5051, threadpoolsize = 20)
-joinThreads(getserver.thread, postserver.thread)
+proc handle(ctx: HttpContext) {.flow.} =
+  ctx.reply("hello world")
+
+let server = newHttpServer(loglevel = lvlInfo)
+serve(server, 8080, handle)          # aliases: start(server, ...)
+wait(server)                         # aliases: join(server, ...)
 ```
 
-## Example 3: Websocket server and multiple clients discussing
+`serve` parameters (after port and handler):
 
-```nim
-const ClientCount = 10
-from os import sleep
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `numWorkers` | `2 × CPU count`, at least 2 | OS threads running stagelane |
+| `connLimit` | 1024 | Max connections per worker (split across workers) |
+| `inflightLimit` | 64 | Max requests in handler at once per worker |
 
-#-----------------
+Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
-import guildenstern/websocketserver
-when epollSupported(): import guildenstern/epolldispatcher
-else: import guildenstern/dispatcher
+## Examples
 
-proc serverReceive() =
-  let message = getMessage()
-  echo "server got: ", message
-  if message == "close?": wsserver.send(thesocket, "close!")
-  else: wsserver.send(thesocket, "Ok!")
+See [`examples/`](examples/):
 
-let server = newWebsocketServer(receive = serverReceive)
-server.start(8080)
+| File | Nimble task |
+|------|-------------|
+| [`helloworld.nim`](examples/helloworld.nim) | `nimble helloworld` |
+| [`getandpost.nim`](examples/getandpost.nim) | `nimble getandpost` |
+| [`httptest.nim`](examples/httptest.nim) | `nimble httptest` |
+| [`asynchandler.nim`](examples/asynchandler.nim) | `nimble asynchandler` |
 
-#-----------------
+Load test (with helloworld on 8080): `./load-test.sh`
 
-import guildenstern/websocketclient
+## API overview
 
-proc clientReceive(client: WebsocketClient) =
-  let message = getMessage()
-  echo "client ", $client.id, " got: ",message
-  if message == "close!": shutdown()
+- [`guildenstern/httpserver`](guildenstern/httpserver.nim) — `HttpContext`, `newHttpServer`, `serve` / `wait`, request helpers (`getUri`, `readBodyChunk`, …), `reply` / chunked replies
+- [`guildenstern/guildenserver`](guildenstern/guildenserver.nim) — logging, `shutdown()`, close causes
+- [`guildenstern/flow`](guildenstern/flow.nim) — stagelane `{.flow.}` support for your handlers
 
-let clientele = newWebsocketClientele()
+## Release notes, 9.0.3 (stagelane port)
 
-proc run() =
-  for i in 1..ClientCount:
-    let client = clientele.newWebsocketClient("ws://0.0.0.0:8080", clientReceive)
-    if not client.connect(): quit()
-    client.send("this comes from client " & $client.id)
-  sleep(100)
-  clientele.clients[1].send("close?")
+- HTTP server on stagelane: M worker threads, connection and in-flight limits, `{.flow.}` handlers with explicit `HttpContext`
+- Removed: `dispatcher`, `epolldispatcher`, websocket and multipart servers, deferred `replyPending` / `asyncdispatch` pattern
+- Dependencies: stagelane; optional local checkout via `config.nims` `--path`
 
-#-----------------
+## Older notes (pre-stagelane)
 
-clientele.start()
-run()
-joinThread(server.thread)
-```
+<details>
+<summary>9.0.2 – 9.0.0</summary>
 
-## Release notes, 9.0.2 (2026-10-19)
-- content-length buffer over-read bug fix: do not use use stale content-length data if content-length header is missing
-- content-length header read performance optimization: use customized Boyer-Moore-Horspool for finding the header
+- **9.0.2** — content-length buffer / Boyer–Moore header search fixes  
+- **9.0.1** — chunked response and NODELAY fixes  
+- **9.0.0** — `std/logging` `Level`; various dispatcher and websocket API changes (websocket since removed on this branch)
 
-
-## Release notes, 9.0.1 (2026-10-04)
-- HTTP chunked response bug fix: if a receiver is slow (causing EAGAIN), do not send corrupted data, but repl(a)y as required
-- HTTP chunked response performance fix: send final terminator without MSG_MORE flag
-- networking fix in dispatchers: set the NODELAY flag to socket connections
-
-
-## Release notes, 9.0.0 (2026-07-26)
-
-### breaking changes
-- instead of custom LogLevel type, the Level type from std/logging module is used, to achieve compatibility with other logging solutions (such as [Bigsister](https://codeberg.org/olliNiinivaara/Bigsister)). Migrate your code by adding the string "lvl" to all log levels. TRACE becomes lvlTRACE, DEBUG becomes lvlDEBUG, INFO becomes lvlINFO, and so on.
-- websocketserver has new initWebsocketClientServer proc for initializing a server in client mode. Previously client mode was inferred from initWebsocketServer proc containing a maskkey argument. That parameter has been removed, and initWebsocketClientServer generates the random mask key automatically
-
-### other
-- starting a server (dispatchers and websocketclientele) always returns true, and all error handling is delegated to throwing an exception. The boolean return value is discardable and deprecated
-- epolldispatcher robustness improvement, especially concerning the shutdown choreography
-- removal of old deprecated features
+</details>
