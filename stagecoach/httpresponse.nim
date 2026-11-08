@@ -13,6 +13,7 @@ const
   version = "HTTP/1.1 "
   http200nocontent = "HTTP/1.1 200 OK\c\LContent-Length: 0\c\L\c\L"
   http204string = "HTTP/1.1 204 No Content\c\L\c\L"
+  keepAliveHeader = "Connection: keep-alive"
   shortdivider = "\c\L"
   longdivider = "\c\L\c\L"
   contentlen = "Content-Length: "
@@ -23,7 +24,14 @@ proc writeToSocket*(ctx: HttpContext, text: string, flags: cint): SocketState {.
     return Complete
   ctx.sendSome(unsafeAddr text[0], text.len, flags)
 
+proc advertiseKeepAlive(ctx: HttpContext): bool {.inline.} =
+  ## HTTP/1.0 clients only keep the connection if the reply says so.
+  ctx.http10 and ctx.keepAlive
+
 proc reply*(ctx: HttpContext, code: HttpCode): SocketState {.flow.} =
+  if ctx.advertiseKeepAlive:
+    return ctx.writeToSocket(version & $code & "\c\L" & keepAliveHeader & shortdivider &
+      zerocontent & shortdivider, lastSendFlags)
   if code == Http200:
     return ctx.writeToSocket(http200nocontent, lastSendFlags)
   if code == Http204:
@@ -40,6 +48,9 @@ proc reply*(ctx: HttpContext, code: HttpCode, body: string, extraHeaders: openAr
   for h in extraHeaders:
     buf.add h
     buf.add shortdivider
+  if ctx.advertiseKeepAlive:
+    buf.add keepAliveHeader
+    buf.add shortdivider
   buf.add contentlen
   buf.addInt body.len
   buf.add longdivider
@@ -55,15 +66,23 @@ template replyHeaders*(ctx: HttpContext, code: HttpCode, headers: openArray[stri
   ctx.reply(code, "", headers)
 
 proc replyStartChunked*(ctx: HttpContext, code: HttpCode = Http200, headers: openArray[string] = []): bool {.flow.} =
+  ## HTTP/1.0 has no chunked encoding: the body is streamed raw and delimited
+  ## by closing the connection.
   var buf = version & $code & "\c\L"
   for h in headers:
     buf.add(h & "\c\L")
-  buf.add("Transfer-Encoding: chunked\c\L\c\L")
+  if ctx.http10:
+    ctx.keepAlive = false
+    buf.add("Connection: close\c\L\c\L")
+  else:
+    buf.add("Transfer-Encoding: chunked\c\L\c\L")
   ctx.writeToSocket(buf, moreSendFlags) != Fail
 
 proc replyContinueChunked*(ctx: HttpContext, chunk: string): bool {.flow.} =
   if chunk.len == 0:      # a zero-length chunk would terminate the stream
     return true
+  if ctx.http10:
+    return ctx.writeToSocket(chunk, moreSendFlags) != Fail
   var buf = chunk.len.toHex.strip(trailing = false, chars = {'0'})
   buf.add shortdivider
   buf.add chunk
@@ -71,6 +90,8 @@ proc replyContinueChunked*(ctx: HttpContext, chunk: string): bool {.flow.} =
   ctx.writeToSocket(buf, moreSendFlags) != Fail
 
 proc replyFinishChunked*(ctx: HttpContext): bool {.flow.} =
+  if ctx.http10:
+    return true            # the close ends the body
   ctx.writeToSocket("0" & longdivider, lastSendFlags) != Fail
 
 proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.deprecated: "use closeHttpSocket".} =

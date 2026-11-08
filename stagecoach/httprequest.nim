@@ -52,6 +52,9 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
     i.inc
   ctx.uristart = start
   ctx.urilen = i - start
+  if unlikely(ctx.urilen == 0):
+    ctx.closeHttpSocket(ProtocolViolated, "empty request target")
+    return false
   let ver = ctx.uristart + ctx.urilen + 1
   if unlikely(ctx.requestlen < ver + 8):
     ctx.closeHttpSocket(ProtocolViolated, "parseRequestLine: no version")
@@ -116,6 +119,10 @@ proc parseHeaders*(ctx: HttpContext): bool =
       var nameEnd = colon
       while nameEnd > i and ctx.request[nameEnd - 1] in {' ', '\t'}:
         dec nameEnd
+      if nameEnd != colon:
+        # RFC 7230 3.2.4: whitespace before the colon is a smuggling vector.
+        ctx.closeHttpSocket(ProtocolViolated, "whitespace before header colon")
+        return false
       for wi in 0 ..< ctx.wanted.len:
         let w = ctx.wanted[wi]
         if eqLower(ctx.request, i, nameEnd - i, w):
@@ -149,7 +156,7 @@ proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
   if ctx.headers["transfer-encoding"].len > 0:
     ctx.closeHttpSocket(ProtocolViolated, "transfer-encoding not supported")
     return false
-  if server.contenttype != ContentType.NoBody:
+  block framing:
     let raw = ctx.headers["content-length"]
     if raw.len > 0:
       var n: int64
@@ -162,6 +169,10 @@ proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
         return false
       if n < 0:
         ctx.closeHttpSocket(ProtocolViolated, "negative content-length")
+        return false
+      if server.contenttype == ContentType.NoBody and n > 0:
+        # No body is ever read, so its bytes would be parsed as the next request.
+        ctx.closeHttpSocket(ProtocolViolated, "request body not accepted (NoBody server)")
         return false
       if server.contenttype == ContentType.Compact and n > server.bufferlength + 1 - ctx.bodystart:
         ctx.closeHttpSocket(ProtocolViolated, "content-length exceeds buffer")
@@ -273,6 +284,9 @@ proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
       t0 = getMonoTime()
     ctx.requestlen += ret
     if ctx.isHeaderreceived(prev, ctx.requestlen.int):
+      if ctx.bodystart > server.maxheaderlength:
+        ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
+        return false
       return true
     if ctx.requestlen > server.maxheaderlength:
       ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")

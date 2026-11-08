@@ -27,8 +27,9 @@ task asynchandler, "Compile and run examples/asynchandler.nim":
 task querybench, "Compile and run examples/querybench.nim":
   compileAndRunExample("querybench")
 
-task test, "Run stagecoach tests":
-  exec "nim c -r --hints:off tests/t_parser.nim"
-  exec "nim c -r --hints:off tests/t_socket.nim"
-  exec "nim c -r --hints:off tests/t_stop.nim"
-  exec "nim c -r --hints:off tests/t_stream.nim"
+task test, "Run stagecoach tests (unit + integration; see `just stress` for soak tests)":
+  for t in ["core", "parser", "io", "response", "http", "modes", "limits", "shutdown", "stop", "stream"]:
+    exec "nim c -r --hints:off --threads:on --outdir:bin tests/t_" & t & ".nim"
+
+task stress, "Run the stress / soak suite":
+  exec "nim c -r -d:release --hints:off --threads:on --outdir:bin tests/t_stress.nim"

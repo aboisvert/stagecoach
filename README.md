@@ -81,6 +81,24 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 - [`stagecoach/coachserver`](stagecoach/coachserver.nim) — logging, `shutdown()`, close causes
 - [`stagecoach/flow`](stagecoach/flow.nim) — stagelane `{.flow.}` support for your handlers
 
+## Testing
+
+```
+just test              # unit + in-process + integration suites
+just test-unit         # t_core, t_parser, t_io, t_response (no network)
+just test-integration  # t_http, t_modes, t_limits, t_shutdown, t_stop, t_stream
+just test-one http     # a single suite (tests/t_http.nim)
+just stress            # concurrent/soak suite (release build, ~10 s)
+nimble test            # same as `just test`
+```
+
+Layers:
+
+- `t_core`, `t_parser`: pure unit tests (defaults, logging, close causes, `recv` classification, request line, headers, framing, pipelining).
+- `t_io`, `t_response`: `beginRequest`/`endRequest` and response framing over a `socketpair`, driven by a scripted peer task.
+- `t_http`, `t_modes`, `t_limits`, `t_shutdown`: spawn `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`).
+- `t_stress`: seeded concurrent pipelined clients with abrupt disconnects, close accounting and an RSS growth check. The seed is printed so a failure can be replayed.
+
 ## Release notes, 0.2 (hardening + lifecycle)
 
 - Request framing is stricter: duplicate wanted headers (a smuggling

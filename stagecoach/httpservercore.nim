@@ -1,6 +1,6 @@
 ## Shared HTTP server types and constants (no request/response I/O).
 
-import std/[strtabs, logging, strutils, atomics, monotimes]
+import std/[strtabs, logging, atomics, monotimes]
 import stagelane/net
 import coachserver
 export coachserver
@@ -123,7 +123,7 @@ proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
   result.initHttpServer(loglevel, parserequestline, contenttype, headerfields)
   for field in result.headerfields:
     for c in field:
-      if c != '-' and not c.isLowerAscii():
+      if c in {'A' .. 'Z'}:
         raise newException(ValueError,
           "Header field not in lower case (case-insensitive matching would never see it): " & field)
 
@@ -136,7 +136,7 @@ proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
     result.wanted.add field
   for field in ["connection", "transfer-encoding"]:
     if field notin result.wanted: result.wanted.add field
-  if server.contenttype != ContentType.NoBody and "content-length" notin result.wanted:
+  if "content-length" notin result.wanted:     # framing is validated in every mode
     result.wanted.add "content-length"
   for field in result.wanted:
     result.headers[field] = ""
