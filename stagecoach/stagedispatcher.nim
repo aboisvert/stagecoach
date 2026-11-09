@@ -10,18 +10,20 @@
 ## stop() pokes the pipes; acceptLoop exits; workerMain lets connection tasks
 ## finish naturally for `drainms` and force-cancels whatever is left.
 
-import std/[posix, os, nativesockets, osproc, logging, atomics]
+import std/[posix, os, nativesockets, osproc, logging, atomics, times, strformat]
 import stagelane/core
 import stagelane/sched
 import stagelane/net
 import stagelane/sync
 import stagelane/transform
-import httpservercore, httprequest, socketio
+import std/httpcore
+import httpservercore, httprequest, httpresponse, socketio
 from coachserver import shutdownCallbacks, isShuttingDown, log
 export httpservercore
 
 when defined(linux):
   const SO_REUSEPORT = 15
+  const TCP_DEFER_ACCEPT = 9
 
 type
   CtxPool* = ref object
@@ -38,7 +40,11 @@ type
 
 var httpRuntimes {.global.}: seq[HttpRuntime]
 
-proc makeListener(port: int): TcpListener =
+proc normalizeBacklog(backlog: int): int =
+  if backlog <= 0: 4096 else: backlog
+
+proc makeListener(port, backlog: int, nodelay: bool): TcpListener =
+  let bl = normalizeBacklog(backlog)
   when defined(linux):
     let fd = createNativeSocket(Domain.AF_INET, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP)
     if fd == osInvalidSocket:
@@ -46,17 +52,27 @@ proc makeListener(port: int): TcpListener =
     fd.setSockOptInt(SOL_SOCKET, SO_REUSEADDR, 1)
     var one: cint = 1
     discard setsockopt(fd, SOL_SOCKET, cint(SO_REUSEPORT), addr one, SockLen(sizeof(one)))
+    # accept returns with the first request bytes already queued (ignore if unsupported).
+    var defer1: cint = 1
+    discard setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, addr defer1, SockLen(sizeof(defer1)))
+    discard fcntl(fd.cint, F_SETFD, FD_CLOEXEC)
+    # Linux: accepted sockets inherit TCP_NODELAY from the listener, so it is set once here.
+    var nd: cint = 1
+    if nodelay:
+      discard setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, addr nd, SockLen(sizeof(nd)))
     var ai = getAddrInfo("0.0.0.0", Port(port), Domain.AF_INET, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP)
     if bindAddr(fd, ai.ai_addr, ai.ai_addrlen.SockLen) < 0:
       freeAddrInfo(ai)
       raiseOSError(osLastError())
     freeAddrInfo(ai)
-    if posix.listen(fd, 128.cint) < 0:
+    # The listen queue absorbs bursts until the connection semaphore is the cap.
+    # The kernel clamps this to net.core.somaxconn.
+    if posix.listen(fd, bl.cint) < 0:
       raiseOSError(osLastError())
     fd.setBlocking(false)
     return TcpListener(fd: fd)
   else:
-    listenTcp(port)
+    listenTcp(port, "0.0.0.0", bl)
 
 proc setNoDelay(fd: SocketHandle) =
   ## Disable Nagle so chunked/small replies are not held back on platforms
@@ -86,11 +102,13 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
   srv.maxInflight = inflightLimit
   srv.port = uint16(port)
   result = HttpRuntime(httpServer: srv)
+  # sendfile has no MSG_NOSIGNAL; a reset peer must not kill the process.
+  signal(SIGPIPE, SIG_IGN)
   for i in 0 ..< nThreads:
     when defined(linux):
-      result.listeners.add makeListener(port)
+      result.listeners.add makeListener(port, srv.backlog, srv.nodelay)
     else:
-      if i == 0: result.sharedListener = listenTcp(port)
+      if i == 0: result.sharedListener = listenTcp(port, "0.0.0.0", normalizeBacklog(srv.backlog))
     var fds: array[2, cint]
     if pipe(fds) != 0:
       raiseOSError(osLastError())
@@ -127,7 +145,7 @@ proc beginRequest*(ctx: HttpContext): bool {.flow.} =
   ## Returns false when the connection should be dropped (socket already closed
   ## if that was due to an error).
   let s = ctx.server
-  if not serverIsOpen(s):
+  if ctx.socket == INVALID_SOCKET or not serverIsOpen(s):
     return false
   ctx.prepareHttpContext(s)
   if not ctx.readHeader(s):
@@ -151,6 +169,7 @@ proc endRequest*(ctx: HttpContext): bool =
       ctx.bodyDelivered < ctx.contentlength:
     return false
   ctx.recordCarry(ctx.server)
+  ctx.compactRequest(s)
   true
 
 proc stop*(srv: HttpServer, drainms = 10_000) =
@@ -209,25 +228,57 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         ctx.socket = clientFd
       else:
         ctx = httpSrv.newHttpContext(clientFd)
-      if httpSrv.nodelay:
-        setNoDelay(clientFd)
+      ctx.holdWrites = true
       try:
-        while ctx.beginRequest():
+        # A child must not inherit an accepted connection.
+        discard fcntl(clientFd.cint, F_SETFD, FD_CLOEXEC)
+        when not defined(linux):
+          if httpSrv.nodelay:
+            setNoDelay(clientFd)
+        when defined(linux):
+          try:
+            ctx.pf = cast[pointer](pioOpen(clientFd.cint))
+          except OSError:
+            ctx.pf = nil         # fall back to the selector path
+        while ctx.socket != INVALID_SOCKET and ctx.beginRequest():
           acquire(w.inflight)
           try:
             handler(ctx)
+          except CancelledError:
+            ctx.closeHttpSocket(Cancelled, "cancelled")
+            break
+          except CatchableError as ex:
+            if not ctx.responded:
+              # Never echo exception text to the client; it is logged on close.
+              ctx.server.log(lvlError, "handler exception: " & ex.msg)
+              ctx.reject(Http500, Excepted, "internal server error")
+            else:
+              # A handler that already wrote a status is closed without a second status.
+              ctx.closeHttpSocket(Excepted, ex.msg)
+            break
           finally:
             release(w.inflight)
+          if ctx.socket == INVALID_SOCKET:
+            break
+          if not ctx.responded:
+            ctx.reject(Http500, Excepted, "handler sent no reply")
+            break
+          if ctx.sendBuf.len > 32 * 1024:
+            if ctx.flushSendBuf() == Fail:
+              break
+          if ctx.holdWrites and ctx.sendBuf.len > 0:
+            if ctx.flushSendBuf() == Fail:
+              break
           if not ctx.endRequest():
             break
-      except CancelledError:
-        ctx.closeHttpSocket(Cancelled, "cancelled")
-      except CatchableError as ex:
-        ctx.closeHttpSocket(Excepted, ex.msg)
       finally:
+        ctx.holdWrites = false
+        if ctx.socket != INVALID_SOCKET and ctx.sendBuf.len > 0:
+          discard ctx.flushSendBuf()
         release(w.connSem)
         ctx.closeHttpSocket(CloseCalled, "")
         if w.pool.ctxs.len < w.pool.cap:
+          ctx.compactRequest(httpSrv)
           ctx.carryLen = 0        # half-consumed pipelined bytes die with the conn
           ctx.carryStart = 0
           w.pool.ctxs.add ctx
@@ -273,6 +324,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
       {.cast(gcsafe).}:
         let worker = newWorker(w.runtime, w.nThreads)
         run workerMain(w.runtime, w.idx, worker)
+        when defined(linux):
+          pioDrain()
 
     rt.threads.setLen(nThreads)
     for i in 0 ..< nThreads:

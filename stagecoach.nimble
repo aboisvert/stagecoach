@@ -28,7 +28,7 @@ task querybench, "Compile and run examples/querybench.nim":
   compileAndRunExample("querybench")
 
 task test, "Run stagecoach tests (unit + integration; see `just stress` for soak tests)":
-  for t in ["core", "parser", "io", "response", "http", "modes", "limits", "shutdown", "stop", "stream"]:
+  for t in ["core", "parser", "io", "response", "pollfd", "http", "modes", "limits", "shutdown", "stop", "stream"]:
     exec "nim c -r --hints:off --threads:on --outdir:bin tests/t_" & t & ".nim"
 
 task stress, "Run the stress / soak suite":

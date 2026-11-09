@@ -9,6 +9,7 @@ test-unit:
     {{nim}} tests/t_parser.nim
     {{nim}} tests/t_io.nim
     {{nim}} tests/t_response.nim
+    {{nim}} tests/t_pollfd.nim
 
 # suites that spawn bin/fixture_server (tests/fixture_server.nim)
 test-integration:

@@ -1,0 +1,229 @@
+diff --git a/src/stagelane/core.nim b/src/stagelane/core.nim
+index fc18d81..eaf31db 100644
+--- a/src/stagelane/core.nim
++++ b/src/stagelane/core.nim
+@@ -22,7 +22,7 @@ when flowThreads:
+ 
+ type
+   TaskState* = enum tsPending, tsDone, tsFailed, tsCancelled
+-  ParkKind* = enum pkNone, pkQueue, pkAny, pkTimer, pkFd
++  ParkKind* = enum pkNone, pkQueue, pkAny, pkTimer, pkFd, pkPio
+ 
+   Hop* = object
+     ## what to run next; `fn == nil` means "nothing: parked or finished"
+diff --git a/src/stagelane/sched.nim b/src/stagelane/sched.nim
+index 9477279..eee4794 100644
+--- a/src/stagelane/sched.nim
++++ b/src/stagelane/sched.nim
+@@ -2,6 +2,8 @@
+ ## structured concurrency on top of the continuation core.
+ import ./core, ./transform
+ import std/[deques, monotimes, os, macros, selectors, tables]
++when defined(linux):
++  import std/[posix, epoll]
+ when defined(windows):
+   import std/nativesockets      # SocketHandle: the Windows (select) selector wants it, not cint
+ when flowThreads:
+@@ -116,6 +118,12 @@ type
+     wheel: Wheel
+     live*: int
+     steps*: uint64
++    when defined(linux):
++      pepOn: bool                  # the persistent (edge-triggered) epoll exists
++      pep: cint
++      pioWaiting: int              # tasks parked on a PollFd (also counted in fdWaiting)
++      pfree: pointer               # freelist of PollFdObj
++      pev: array[256, EpollEvent]
+ 
+ 
+ var theSched {.threadvar.}: Scheduler
+@@ -633,7 +641,171 @@ proc waitWritable*(fd: int) {.flowCtor: writeCtor, inlineSuspend: writeHook.} =
+   ## suspend until `fd` is writable
+   blockOn(writeCtor(fd))
+ 
++  # stagecoach: persistent PollFd — atlas install drops this patch
++when defined(linux):
++  # --- persistent, edge-triggered descriptors ("PollFd") ---------------------
++  # `waitReadable`/`waitWritable` register the fd with epoll for the duration of
++  # one wait and unregister it afterwards: two epoll_ctl calls per wait, plus a
++  # table lookup and an allocated result list per poll.  A server that handles
++  # a request per wakeup cannot afford that.  A `PollFd` is registered ONCE
++  # (edge-triggered, for read and write) and keeps two latched readiness bits:
++  #   * the event handler sets the bit (and wakes the waiter, if there is one);
++  #   * the I/O code clears it when the socket said EAGAIN or returned a short
++  #     read (a short read on a stream socket proves it is drained: the next
++  #     byte raises a new edge) and then calls `pioWaitRead/Write`, which
++  #     returns at once if the bit is set and parks otherwise.
++  # Result: a request costs one recv + one send, and the amortised epoll_wait.
++  type
++    PollFdObj* = object
++      fd*: cint
++      rdReady*, wrReady*: bool     ## latched readiness (see above); read/write by the owner
++      rd, wr: pointer              # parked continuations
++      nextFree: pointer
++    PollFd* = ptr PollFdObj
++
++  proc pioInit(s: Scheduler) {.noinline.} =
++    s.pep = epoll_create1(O_CLOEXEC)
++    if s.pep < 0: raiseOSError(osLastError())
++    s.pepOn = true
++    # nested in the selector so that legacy blocking waits notice persistent events too
++    if s.sel == nil: s.sel = newSelector[int]()
++    s.sel.registerHandle(s.pep.int, {Event.Read}, 0)
++    when flowThreads:
++      # the mailbox wake-up must also interrupt a blocking epoll_wait on `pep`
++      var ev: EpollEvent
++      ev.events = EPOLLIN or EPOLLET
++      ev.data.u64 = 0
++      let efd = cast[ptr cint](s.shared.wake)[]
++      discard epoll_ctl(s.pep, EPOLL_CTL_ADD, efd, addr ev)
++
++  proc pioOpen*(fd: int): PollFd =
++    ## register `fd` (must be non-blocking) with this thread's scheduler.  Both
++    ## readiness bits start as set: try the syscall first, wait on EAGAIN.
++    let s {.cursor.} = sched()
++    if not s.pepOn: pioInit(s)
++    if s.pfree != nil:
++      result = cast[PollFd](s.pfree)
++      s.pfree = result.nextFree
++      zeroMem(result, sizeof(PollFdObj))
++    else:
++      result = cast[PollFd](alloc0(sizeof(PollFdObj)))
++    result.fd = fd.cint
++    result.rdReady = true
++    result.wrReady = true
++    var ev: EpollEvent
++    ev.events = EPOLLIN or EPOLLOUT or EPOLLET or EPOLLRDHUP
++    ev.data.`ptr` = result
++    if epoll_ctl(s.pep, EPOLL_CTL_ADD, fd.cint, addr ev) < 0:
++      let e = osLastError()
++      result.nextFree = s.pfree
++      s.pfree = cast[pointer](result)
++      raiseOSError(e)
++
++  proc pioClose*(p: PollFd) =
++    ## close the descriptor and recycle the handle.  Closing removes the fd from
++    ## the epoll set (the fd is never dup'ed), so no DEL syscall is needed.
++    let s {.cursor.} = sched()
++    if p.rd != nil:
++      let w = p.rd
++      p.rd = nil; dec s.fdWaiting; dec s.pioWaiting
++      wake(w)
++    if p.wr != nil:
++      let w = p.wr
++      p.wr = nil; dec s.fdWaiting; dec s.pioWaiting
++      wake(w)
++    discard posix.close(p.fd)
++    p.fd = -1
++    p.nextFree = s.pfree
++    s.pfree = cast[pointer](p)
++
++  proc pioDrain*() =
++    ## free this thread's recycled PollFd handles and close its persistent epoll
++    ## (call when the thread is done with all of its PollFds)
++    let s {.cursor.} = sched()
++    while s.pfree != nil:
++      let p = cast[PollFd](s.pfree)
++      s.pfree = p.nextFree
++      dealloc(p)
++    if s.pepOn:
++      s.sel.unregister(s.pep.int)
++      discard posix.close(s.pep)
++      s.pepOn = false
++
++  proc pioDrop(p: PollFd, write: bool) =
++    let s {.cursor.} = sched()
++    if write:
++      if p.wr != nil: (p.wr = nil; dec s.fdWaiting; dec s.pioWaiting)
++    else:
++      if p.rd != nil: (p.rd = nil; dec s.fdWaiting; dec s.pioWaiting)
++
++  proc pioHook(c: Frame, p: PollFd, write: bool): Hop =
++    let pc = cast[pointer](c)
++    if (write and p.wrReady) or (not write and p.rdReady): return step(pc)
++    cancelGuard(c)
++    let s {.cursor.} = sched()
++    if (write and p.wr != nil) or (not write and p.rd != nil):
++      c.ex = newException(IOError, "another task already waits on this fd")
++      return step(pc)
++    let t = c.task
++    if t != nil:
++      t.parked = pc; t.parkKind = pkPio; t.parkRef = cast[pointer](p); t.parkWrite = write
++    if write: p.wr = pc else: p.rd = pc
++    inc s.fdWaiting; inc s.pioWaiting
++    noStep
++
++  proc pioReadHook*(c: Frame, p: PollFd): Hop = pioHook(c, p, false)
++  proc pioWriteHook*(c: Frame, p: PollFd): Hop = pioHook(c, p, true)
++
++  proc pioReadLeaf(p: pointer): Hop =
++    let c = cast[PrimLeaf](p)
++    c.fn = doneStage; pioHook(c, cast[PollFd](c.n), false)
++  proc pioWriteLeaf(p: pointer): Hop =
++    let c = cast[PrimLeaf](p)
++    c.fn = doneStage; pioHook(c, cast[PollFd](c.n), true)
++  proc pioReadCtor(p: PollFd): Frame = PrimLeaf(fn: pioReadLeaf, n: cast[int](p))
++  proc pioWriteCtor(p: PollFd): Frame = PrimLeaf(fn: pioWriteLeaf, n: cast[int](p))
++
++  proc pioWaitRead*(p: PollFd) {.flowCtor: pioReadCtor, inlineSuspend: pioReadHook.} =
++    ## suspend until `p.rdReady` is set (returns at once when it already is)
++    blockOn(pioReadCtor(p))
++
++  proc pioWaitWrite*(p: PollFd) {.flowCtor: pioWriteCtor, inlineSuspend: pioWriteHook.} =
++    ## suspend until `p.wrReady` is set (returns at once when it already is)
++    blockOn(pioWriteCtor(p))
++
++  proc pioDispatch(s: Scheduler, n: int) {.inline.} =
++    for i in 0..<n:
++      let ev = s.pev[i].events
++      let p = cast[PollFd](s.pev[i].data.`ptr`)
++      if p == nil: continue                       # the mailbox wake-up
++      if (ev and (EPOLLIN or EPOLLRDHUP or EPOLLHUP or EPOLLERR)) != 0:
++        p.rdReady = true
++        if p.rd != nil:
++          let w = p.rd
++          p.rd = nil; dec s.fdWaiting; dec s.pioWaiting
++          wake(w)
++      if (ev and (EPOLLOUT or EPOLLHUP or EPOLLERR)) != 0:
++        p.wrReady = true
++        if p.wr != nil:
++          let w = p.wr
++          p.wr = nil; dec s.fdWaiting; dec s.pioWaiting
++          wake(w)
++
++
+ proc pollIo(s: Scheduler, timeoutMs: int) =
++  when defined(linux):
++    if s.pepOn:
++      if s.fdWaiting == s.pioWaiting:
++        let n = epoll_wait(s.pep, addr s.pev[0], 256, timeoutMs.cint)
++        if n > 0: pioDispatch(s, n)
++        return
++      pollLegacy(s, timeoutMs)
++      let n = epoll_wait(s.pep, addr s.pev[0], 256, 0)
++      if n > 0: pioDispatch(s, n)
++      return
++  pollLegacy(s, timeoutMs)
++
++proc pollLegacy(s: Scheduler, timeoutMs: int) =
+   if s.sel == nil: return
+   let evs = s.sel.select(timeoutMs)
+   for k in evs:
+@@ -770,6 +942,8 @@ proc cancelLocal(t: TaskBase) =
+       st.target = nil
+     of pkTimer: cancel(cast[Timer](t.parkRef))
+     of pkFd: dropFdWaiter(int(t.parkFd), t.parkWrite)
++    of pkPio:
++      when defined(linux): pioDrop(cast[PollFd](t.parkRef), t.parkWrite)
+     of pkNone: discard
+     envOf(leaf).ex = newCancelled()
+     schedule(leaf)
+@@ -881,7 +1055,7 @@ proc runLoop*(until: TaskBase = nil, forever = false) =
+       of pkQueue: "a channel / lock / event that nothing can ever signal"
+       of pkAny: "several events (select / any) none of which can fire"
+       of pkTimer: "a timer"
+-      of pkFd: "a file descriptor"
++      of pkFd, pkPio: "a file descriptor"
+       of pkNone: "nothing (it was never resumed)"
+     raise newException(DeadlockError,
+       "event loop ran out of work but the awaited task is still pending: it is parked on " &

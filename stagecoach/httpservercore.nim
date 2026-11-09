@@ -6,6 +6,14 @@ import coachserver
 export coachserver
 
 type
+  WantedIdx* = object
+    conn*, te*, expect*, cl*: int
+
+  HttpSpan* = object
+    ## View into `ctx.request`; valid until `prepareHttpContext` or `compactRequest`.
+    start*: int64
+    len*: int64
+
   ContentType* = enum
     NoBody
     Compact
@@ -21,11 +29,14 @@ type
     contenttype*: ContentType
     maxheaderlength*: int64
     bufferlength*: int64
-    sockettimeoutms*: int      ## max wait for any single read/write (<= 0: none)
+    sockettimeoutms*: int      ## max wait for any single read/write in a request (<= 0: none)
+    idleTimeoutms*: int        ## close a connection idle before the first byte (<= 0: none)
     requestTimeoutms*: int     ## max time to receive a full header/body once started (<= 0: none)
     parserequestline*: bool
     headerfields*: seq[string]
     nodelay*: bool             ## set TCP_NODELAY on accepted sockets (default true)
+    backlog*: int              ## listen backlog (0 = 4096)
+    sendDate*: bool            ## add a cached Date header (default off)
     osThreads*: int
     maxConnections*: int
     maxInflight*: int
@@ -81,11 +92,21 @@ type
     carryLen*: int64
     carryStart*: int64
     headers*: StringTableRef
+    userFields*: int       ## first N entries of `wanted` are user-requested (copied to `headers`)
+    wantedIdx*: WantedIdx
+    queryAt*: int32        ## offset of '?' within the target, or -1
+    headerStart*: seq[int32]
+    headerLen*: seq[int32]
     keepAlive*: bool
     streamScratch*: string
     sendBuf*: string       ## reused response buffer
     http10*: bool
     wanted*: seq[string]   ## lower-case header names captured into `headers`
+    responded*: bool       ## a status line was sent or appended for this request
+    headOnly*: bool        ## HEAD: Content-Length is the representation size; omit body bytes
+    holdWrites*: bool      ## reply appends to sendBuf; the session flushes (connectionLoop)
+    idleExpired*: bool     ## idle timer shut the socket down (close as TimedOut, not client EOF)
+    pf*: pointer            ## Linux PollFd when the persistent epoll path is active; else nil
 
 const
   MSG_DONTWAIT* = when defined(macosx): 0x80.cint else: 0x40.cint
@@ -107,11 +128,14 @@ proc initHttpServer*(s: HttpServer, loglevel: Level, parserequestline: bool,
   s.maxheaderlength = 10000.int64
   s.bufferlength = 100000.int64
   s.sockettimeoutms = 5000
+  s.idleTimeoutms = 30000
   s.requestTimeoutms = 30000
   s.contenttype = contenttype
   s.parserequestline = parserequestline
   s.headerfields = @headerfields
   s.nodelay = true
+  s.backlog = 4096
+  s.sendDate = false
   s.osThreads = 0
   s.maxConnections = 0
   s.maxInflight = 0
@@ -134,9 +158,19 @@ proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result.headers = newStringTable()
   for field in server.headerfields:
     result.wanted.add field
-  for field in ["connection", "transfer-encoding"]:
+  for field in ["connection", "transfer-encoding", "expect"]:
     if field notin result.wanted: result.wanted.add field
   if "content-length" notin result.wanted:     # framing is validated in every mode
     result.wanted.add "content-length"
+  result.userFields = server.headerfields.len
+  result.wantedIdx = WantedIdx(conn: result.wanted.find("connection"),
+    te: result.wanted.find("transfer-encoding"), expect: result.wanted.find("expect"),
+    cl: result.wanted.find("content-length"))
+  result.queryAt = -1
+  result.headerStart.setLen(result.wanted.len)
+  result.headerLen.setLen(result.wanted.len)
+  for i in 0 ..< result.wanted.len:
+    result.headerStart[i] = -1
+    result.headerLen[i] = 0
   for field in result.wanted:
     result.headers[field] = ""

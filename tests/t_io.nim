@@ -69,7 +69,8 @@ suite "beginRequest":
     check (run driveBegin(p.ctx, p.peer, @[r1 & r2], 0)) == brTrue
     check p.ctx.getBody() == "abc"
     check p.ctx.endRequest()
-    check p.ctx.carryLen == r2.len
+    check p.ctx.carryLen == 0
+    check p.ctx.requestlen == r2.len
     check (run driveBegin(p.ctx, p.peer, @[], 0)) == brTrue
     check p.ctx.getUri() == "/two"
     p.closePeer()
@@ -96,17 +97,50 @@ suite "beginRequest":
     peerSend(p.peer, "GET /x HTTP/1.1\r\nX: " & repeat('a', 200))
     check (run driveBegin(p.ctx, p.peer, @[], 0)) == brFalse
     check closeCauses == @[ProtocolViolated]
+    check "431" in peerRecvAll(p.peer)
     p.closePeer()
 
   test "bad request line is a protocol violation":
     var p = newPair(mkServer())
     check (run driveBegin(p.ctx, p.peer, @["GET /x HTTP/9.9\r\n\r\n"], 0)) == brFalse
     check closeCauses == @[ProtocolViolated]
+    check "400" in peerRecvAll(p.peer)
     p.closePeer()
 
-  test "idle peer is cancelled by sockettimeoutms":
+  test "transfer-encoding receives 501":
     var p = newPair(mkServer())
-    check (run driveBegin(p.ctx, p.peer, @[], 0)) == brCancelled
+    check (run driveBegin(p.ctx, p.peer,
+      @["POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"], 0)) == brFalse
+    check closeCauses == @[ProtocolViolated]
+    check "501" in peerRecvAll(p.peer)
+    p.closePeer()
+
+  test "unknown Expect receives 417":
+    var p = newPair(mkServer())
+    check (run driveBegin(p.ctx, p.peer,
+      @["POST /x HTTP/1.1\r\nExpect: foo\r\nContent-Length: 0\r\n\r\n"], 0)) == brFalse
+    check closeCauses == @[ProtocolViolated]
+    check "417" in peerRecvAll(p.peer)
+    p.closePeer()
+
+  test "Expect 100-continue then body":
+    var p = newPair(mkServer())
+    let hdr = "POST /x HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n"
+    let t = go peerScript(p.peer, @[hdr, "abc"], 5)
+    check p.ctx.beginRequest()
+    let wire = peerRecvAll(p.peer)
+    check "100 Continue" in wire
+    check p.ctx.getBody() == "abc"
+    cancel(t)
+    p.closePeer()
+
+  test "idle peer is closed by idleTimeoutms":
+    let s = mkServer()
+    s.idleTimeoutms = 200
+    s.sockettimeoutms = 60_000
+    var p = newPair(s)
+    check (run driveBegin(p.ctx, p.peer, @[], 0)) == brFalse
+    check closeCauses == @[TimedOut]
     p.closePeer()
 
   test "dribbling header hits requestTimeoutms":
@@ -131,6 +165,23 @@ suite "streaming":
     for i in countup(0, body.len - 1, 50): chunks.add body[i ..< min(i + 50, body.len)]
     check (run streamBody(p.ctx, p.peer, chunks)) == body
     check p.ctx.endRequest()
+    p.closePeer()
+
+  test "pipelined replies coalesce in one recv":
+    var p = newPair(mkServer())
+    let r1 = "GET /a HTTP/1.1\r\n\r\n"
+    let r2 = "GET /b HTTP/1.1\r\n\r\n"
+    peerSend(p.peer, r1 & r2)
+    p.ctx.holdWrites = true
+    check p.ctx.beginRequest()
+    p.ctx.reply("a")
+    check p.ctx.endRequest()
+    check p.ctx.beginRequest()
+    p.ctx.reply("b")
+    check p.ctx.flushSendBuf() != Fail
+    let wire = peerRecvAll(p.peer)
+    check wire.count("HTTP/1.1 200") == 2
+    check "a" in wire and "b" in wire
     p.closePeer()
 
 suite "endRequest":

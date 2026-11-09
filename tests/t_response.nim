@@ -1,6 +1,6 @@
 ## Response framing over a socketpair: exact wire bytes, chunked encoding,
 ## partial writes, write timeout and writes to a closed peer.
-import std/[unittest, strutils, posix, nativesockets]
+import std/[unittest, strutils, posix, nativesockets, os]
 import stagecoach/[flow, httpserver]
 import stagelane/sched
 import helpers/pairs
@@ -26,6 +26,10 @@ proc doCreated(ctx: HttpContext) {.flow.} = ctx.reply(Http201, "x", ["Location: 
 proc doHeaders(ctx: HttpContext) {.flow.} = ctx.replyHeaders(Http303, ["Location: /z"])
 proc doEmptyBody(ctx: HttpContext) {.flow.} = ctx.reply("")
 
+proc doHead(ctx: HttpContext) {.flow.} =
+  ctx.headOnly = true
+  ctx.reply("abc")
+
 suite "wire format":
   test "bare status replies":
     check wire(doReply200) == "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
@@ -40,6 +44,11 @@ suite "wire format":
     check wire(doCreated) ==
       "HTTP/1.1 201 Created\r\nLocation: /a\r\nX-B: c\r\nContent-Length: 1\r\n\r\nx"
     check wire(doHeaders) == "HTTP/1.1 303 See Other\r\nLocation: /z\r\nContent-Length: 0\r\n\r\n"
+
+  test "HEAD omits body bytes but keeps Content-Length":
+    let got = wire(doHead)
+    check got == "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n"
+    check "abc" notin got
 
 proc sendChunked(ctx: HttpContext, chunks: seq[string]) {.flow.} =
   discard ctx.replyStartChunked(Http200, ["X-T: 1"])
@@ -98,8 +107,7 @@ suite "sendBuf reuse":
   test "small responses keep the buffer, big ones drop it":
     var p = newPair(mkServer())
     run doBody(p.ctx)
-    check p.ctx.sendBuf.len > 0
-    p.ctx.sendBuf = ""
+    check p.ctx.sendBuf.len == 0     # flushed; the buffer is kept for reuse
     let s = mkServer()
     s.sockettimeoutms = 3000
     var p2 = newPair(s)
@@ -143,5 +151,70 @@ suite "partial writes and failures":
     check st == Fail
     check p.ctx.socket == INVALID_SOCKET
 
+proc doDate(ctx: HttpContext) {.flow.} = ctx.reply("x")
+
+proc doHeadFile(ctx: HttpContext, path: string) {.flow.} =
+  ctx.headOnly = true
+  discard ctx.replyFile(path)
+
+suite "sendDate and replyFile":
+  test "sendDate adds a 37-byte Date line":
+    var s = mkServer()
+    s.sendDate = true
+    var p = newPair(s)
+    run doDate(p.ctx)
+    let got = peerRecvAll(p.peer)
+    p.closePeer()
+    check got.count("Date: ") == 1
+    check got.startsWith("HTTP/1.1 200")
+    let di = got.find("\r\nDate: ")
+    check di > 0
+    check got[di + 2 ..< got.find("\r\n", di + 2) + 2].len == 37
+
+  test "replyFile sends Content-Length and body bytes":
+    let path = getTempDir() / "stagecoach_replyfile_test"
+    writeFile(path, "file-bytes")
+    let p = path
+    proc doFile(ctx: HttpContext) {.flow.} = discard ctx.replyFile(p)
+    let got = wire(doFile)
+    removeFile(path)
+    check "Content-Length: 10" in got
+    check got.endsWith("file-bytes")
+
+  test "HEAD replyFile omits body":
+    let path = getTempDir() / "stagecoach_headfile_test"
+    writeFile(path, "secret")
+    let p = path
+    proc headFile(ctx: HttpContext) {.flow.} = doHeadFile(ctx, p)
+    let got = wire(headFile)
+    removeFile(path)
+    check "Content-Length: 6" in got
+    check "secret" notin got
+
 when isMainModule:
   echo "Response tests finished"
+
+suite "review regressions":
+  test "HEAD stays body-less with parserequestline off":
+    var s = newHttpServer(loglevel = lvlError, parserequestline = false)
+    s.sockettimeoutms = 300
+    var p = newPair(s)
+    peerSend(p.peer, "HEAD /x HTTP/1.1\r\n\r\n")
+    check p.ctx.beginRequest()
+    check p.ctx.headOnly
+    p.closePeer()
+
+  test "reject does not echo exception text and sets Content-Type":
+    var p = newPair(mkServer())
+    p.ctx.reject(Http500, Excepted, "internal server error")
+    let got = peerRecvAll(p.peer)
+    p.closePeer()
+    check got.startsWith("HTTP/1.1 500")
+    check "Content-Type: text/plain" in got
+
+  test "replyFile on a missing path fails without touching the socket":
+    var p = newPair(mkServer())
+    proc doMissing(ctx: HttpContext) {.flow.} = check not ctx.replyFile("/nonexistent/x")
+    run doMissing(p.ctx)
+    check not p.ctx.responded
+    p.closePeer()

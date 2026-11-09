@@ -119,7 +119,7 @@ proc main() =
   var mode = "compact"
   var parseline = true
   var headers: seq[string]
-  var sockTimeout, reqTimeout = -1
+  var sockTimeout, reqTimeout, idleTimeout = -1
   var maxHeader, buffer = -1
   var threads = 1
   var connLimit = 64
@@ -133,6 +133,7 @@ proc main() =
     of "parseline": parseline = val == "on"
     of "headers": headers = val.split(',')
     of "socketTimeout": sockTimeout = parseInt(val)
+    of "idleTimeout": idleTimeout = parseInt(val)
     of "requestTimeout": reqTimeout = parseInt(val)
     of "maxHeader": maxHeader = parseInt(val)
     of "buffer": buffer = parseInt(val)
@@ -149,6 +150,7 @@ proc main() =
                            contenttype = ct, headerfields = headers)
     result.onCloseSocketCallback = onClose
     if sockTimeout >= 0: result.sockettimeoutms = sockTimeout
+    if idleTimeout >= 0: result.idleTimeoutms = idleTimeout
     if reqTimeout >= 0: result.requestTimeoutms = reqTimeout
     if buffer >= 0: result.bufferlength = buffer
     if maxHeader >= 0: result.maxheaderlength = maxHeader

@@ -31,10 +31,12 @@ suite "server defaults":
     check s.maxheaderlength == 10000
     check s.bufferlength == 100000
     check s.sockettimeoutms == 5000
+    check s.idleTimeoutms == 30000
     check s.requestTimeoutms == 30000
     check s.contenttype == Compact
     check s.parserequestline
     check s.nodelay
+    check s.backlog == 4096
     check s.runtime.isNil
     check not s.started
 

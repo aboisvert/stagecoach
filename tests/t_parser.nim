@@ -125,7 +125,7 @@ suite "HTTP parsing":
     let c = s.newHttpContext(INVALID_SOCKET)
     c.load "GET / HTTP/1.1\c\LHost: t\c\LOrigin:   http://x  \c\L\c\L"
     check c.parseAll(s)
-    check c.headers["origin"] == "http://x"
+    check c.headerValue("origin") == "http://x"
 
   test "extension and non-prefixed methods are valid tokens":
     for m in ["REPORT", "LOCK", "QUERY", "PAPAYA", "GHOST"]:
@@ -269,9 +269,9 @@ suite "HTTP parsing: extended":
     let c = s.newHttpContext(INVALID_SOCKET)
     c.load "GET / HTTP/1.1\c\LX-A:nospace\c\Lx-B:\t tab \t\c\LX-C:\c\LX-Other: 1\c\L\c\L"
     check c.parseAll(s)
-    check c.headers["x-a"] == "nospace"
-    check c.headers["x-b"] == "tab"
-    check c.headers["x-c"] == ""
+    check c.headerValue("x-a") == "nospace"
+    check c.headerValue("x-b") == "tab"
+    check c.headerValue("x-c") == ""
 
   test "whitespace between header name and colon is rejected (RFC 7230 3.2.4)":
     for raw in ["GET / HTTP/1.1\c\LContent-Length : 5\c\L\c\L",

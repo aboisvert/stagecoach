@@ -201,10 +201,12 @@ suite "http basics (compact)":
     check stillServes()
 
   test "idle connection times out":
+    fx.stopFixture()
+    fx = startFixture(@["--socketTimeout=60000", "--idleTimeout=400"])
     let c = connectRaw(fx.port)
     defer: c.close()
     check c.expectClosed(3000)
-    check fx.waitStat("close.Cancelled", 1)
+    check fx.waitStat("close.TimedOut", 1)
 
   test "compact body at the bufferlength bound":
     fx.stopFixture()

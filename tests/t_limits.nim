@@ -63,7 +63,7 @@ suite "timeouts":
   teardown: stopFixture(fx)
 
   test "idle keep-alive closes after sockettimeoutms":
-    fx = startFixture(@["--socketTimeout=300"])
+    fx = startFixture(@["--socketTimeout=60000", "--idleTimeout=300"])
     let c = connectRaw(fx.port)
     defer: c.close()
     check c.get("/").status == 200

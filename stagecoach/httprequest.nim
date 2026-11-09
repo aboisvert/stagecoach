@@ -4,6 +4,8 @@ import stagelane/core
 import stagelane/transform
 import httpservercore
 import socketio
+import httpcore
+import httpresponse
 from coachserver import SocketCloseCause, isShuttingDown
 export socketio
 
@@ -28,18 +30,18 @@ proc isTchar(c: char): bool {.inline.} =
 
 proc parseMethod*(ctx: HttpContext): bool =
   if unlikely(ctx.requestlen < 13):
-    ctx.closeHttpSocket(ProtocolViolated, "too short request")
+    ctx.reject(Http400, ProtocolViolated, "too short request")
     return false
   while ctx.methlen < ctx.requestlen and ctx.request[ctx.methlen] != ' ':
     ctx.methlen.inc
   if unlikely(ctx.methlen == ctx.requestlen):
-    ctx.closeHttpSocket(ProtocolViolated, "http method missing")
+    ctx.reject(Http400, ProtocolViolated, "http method missing")
     return false
   # The whole method must be a valid token: accepts standard and extension
   # methods (REPORT, LOCK, QUERY, ...) and rejects non-token bytes.
   for i in 0 ..< ctx.methlen.int:
     if not ctx.request[i].isTchar():
-      ctx.closeHttpSocket(ProtocolViolated, "invalid http method")
+      ctx.reject(Http400, ProtocolViolated, "invalid http method")
       return false
   true
 
@@ -53,15 +55,15 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
   ctx.uristart = start
   ctx.urilen = i - start
   if unlikely(ctx.urilen == 0):
-    ctx.closeHttpSocket(ProtocolViolated, "empty request target")
+    ctx.reject(Http400, ProtocolViolated, "empty request target")
     return false
   let ver = ctx.uristart + ctx.urilen + 1
   if unlikely(ctx.requestlen < ver + 8):
-    ctx.closeHttpSocket(ProtocolViolated, "parseRequestLine: no version")
+    ctx.reject(Http400, ProtocolViolated, "parseRequestLine: no version")
     return false
   if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.") or ctx.request[ver + 7] notin {'0', '1'} or
       ctx.request[ver + 8] != '\c'):
-    ctx.closeHttpSocket(ProtocolViolated, "request not HTTP/1.x")
+    ctx.reject(Http400, ProtocolViolated, "request not HTTP/1.x")
     return false
   ctx.http10 = ctx.request[ver + 7] == '0'
   server.log(lvlDebug, $server.port & "/" & $ctx.socket & ": " &
@@ -82,12 +84,38 @@ proc isHeaderreceived*(ctx: HttpContext, previouslen, currentlen: int): bool =
     inc i
   false
 
-proc hasConnToken(value: string, token: string): bool {.inline.} =
-  ## True when a comma-separated Connection list contains `token`.
-  for t in value.split(','):
-    if strip(t, leading = true, trailing = true) == token:
-      return true
+proc hasTokenIn(buf: string, start, len: int, token: string): bool =
+  ## Case-insensitive search for `token` in a comma-separated list held in
+  ## `buf[start ..< start+len]`, without allocating.
+  var i = start
+  let e = start + len
+  while i <= e:
+    var j = i
+    while j < e and buf[j] != ',': inc j
+    var a = i
+    var z = j
+    while a < z and buf[a] in {' ', '\t'}: inc a
+    while z > a and buf[z - 1] in {' ', '\t'}: dec z
+    if eqLower(buf, a, z - a, token): return true
+    i = j + 1
   false
+
+proc headerFieldSlice(ctx: HttpContext, name: string): string {.inline.} =
+  let wi = ctx.wanted.find(name)
+  if wi < 0: return ""
+  let st = ctx.headerStart[wi].int64
+  let ln = ctx.headerLen[wi].int64
+  if ln <= 0: return ""
+  ctx.request[st ..< st + ln]
+
+proc headerValue*(ctx: HttpContext, name: string): string =
+  ## `name` must be lower-case and listed in `headerfields` (or be a framing header).
+  headerFieldSlice(ctx, name)
+
+proc headerSpan*(ctx: HttpContext, name: string): HttpSpan =
+  let wi = ctx.wanted.find(name)
+  if wi < 0: return HttpSpan()
+  HttpSpan(start: ctx.headerStart[wi].int64, len: ctx.headerLen[wi].int64)
 
 proc parseHeaders*(ctx: HttpContext): bool =
   ## Line-based scan that stores only the header names in `ctx.wanted`.
@@ -110,7 +138,7 @@ proc parseHeaders*(ctx: HttpContext): bool =
     if lineEnd > i and ctx.request[lineEnd - 1] == '\c':
       dec lineEnd
     else:
-      ctx.closeHttpSocket(ProtocolViolated, "header line not CRLF-terminated")
+      ctx.reject(Http400, ProtocolViolated, "header line not CRLF-terminated")
       return false
     var colon = i
     while colon < lineEnd and ctx.request[colon] != ':':
@@ -121,15 +149,19 @@ proc parseHeaders*(ctx: HttpContext): bool =
         dec nameEnd
       if nameEnd != colon:
         # RFC 7230 3.2.4: whitespace before the colon is a smuggling vector.
-        ctx.closeHttpSocket(ProtocolViolated, "whitespace before header colon")
+        ctx.reject(Http400, ProtocolViolated, "whitespace before header colon")
         return false
       for wi in 0 ..< ctx.wanted.len:
         let w = ctx.wanted[wi]
         if eqLower(ctx.request, i, nameEnd - i, w):
           let bit = 1 shl wi
           if (seen and bit) != 0:
-            ctx.closeHttpSocket(ProtocolViolated, "duplicate header field: " & w)
-            return false
+            # Only framing/identity headers are a smuggling risk; for other
+            # requested headers the first occurrence wins.
+            if w in ["content-length", "transfer-encoding", "connection", "expect", "host"]:
+              ctx.reject(Http400, ProtocolViolated, "duplicate header field: " & w)
+              return false
+            break
           seen = seen or bit
           var vs = colon + 1
           while vs < lineEnd and ctx.request[vs] in {' ', '\t'}:
@@ -137,7 +169,12 @@ proc parseHeaders*(ctx: HttpContext): bool =
           var ve = lineEnd
           while ve > vs and ctx.request[ve - 1] in {' ', '\t'}:
             dec ve
-          ctx.headers[w] = ctx.request[vs ..< ve]
+          ctx.headerStart[wi] = vs.int32
+          ctx.headerLen[wi] = (ve - vs).int32
+          # Internal framing headers are read from spans; only user-requested
+          # fields (listed first in `wanted`) are copied into the table.
+          if wi < ctx.userFields:
+            ctx.headers[w] = ctx.request[vs ..< ve]
           break
     i = eol + 1
   true
@@ -151,41 +188,48 @@ proc requestLineIsHttp10(ctx: HttpContext): bool =
 proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
   ## Validates framing headers (Content-Length, Transfer-Encoding) and decides
   ## keep-alive. Closes the socket and returns false on a protocol violation.
+  ctx.headOnly = ctx.requestlen >= 5 and ctx.request.bytesEq(0, "HEAD ")
   if not ctx.parseHeaders():
     return false
-  if ctx.headers["transfer-encoding"].len > 0:
-    ctx.closeHttpSocket(ProtocolViolated, "transfer-encoding not supported")
+  if ctx.headerLen[ctx.wantedIdx.te] > 0:
+    ctx.reject(Http501, ProtocolViolated, "transfer-encoding not supported")
+    return false
+  let ei = ctx.wantedIdx.expect
+  if ctx.headerLen[ei] > 0 and not ctx.request.hasTokenIn(ctx.headerStart[ei], ctx.headerLen[ei], "100-continue"):
+    # Any expectation other than 100-continue is rejected before reading a body.
+    ctx.reject(Http417, ProtocolViolated, "expectation failed")
     return false
   block framing:
-    let raw = ctx.headers["content-length"]
-    if raw.len > 0:
+    let ci = ctx.wantedIdx.cl
+    if ctx.headerLen[ci] > 0:
       var n: int64
-      try:
-        for c in raw:
-          if c notin {'0' .. '9'}: raise newException(ValueError, "digit")
-        n = parseBiggestInt(raw)
-      except ValueError:
-        ctx.closeHttpSocket(ProtocolViolated, "non-parseable content-length")
-        return false
-      if n < 0:
-        ctx.closeHttpSocket(ProtocolViolated, "negative content-length")
+      var bad = false
+      for k in 0 ..< ctx.headerLen[ci].int:
+        let c = ctx.request[ctx.headerStart[ci].int + k]
+        if c notin {'0' .. '9'} or n > (high(int64) - 9) div 10:
+          bad = true
+          break
+        n = n * 10 + (ord(c) - ord('0')).int64
+      if bad:
+        ctx.reject(Http400, ProtocolViolated, "non-parseable content-length")
         return false
       if server.contenttype == ContentType.NoBody and n > 0:
         # No body is ever read, so its bytes would be parsed as the next request.
-        ctx.closeHttpSocket(ProtocolViolated, "request body not accepted (NoBody server)")
+        ctx.reject(Http400, ProtocolViolated, "request body not accepted (NoBody server)")
         return false
       if server.contenttype == ContentType.Compact and n > server.bufferlength + 1 - ctx.bodystart:
-        ctx.closeHttpSocket(ProtocolViolated, "content-length exceeds buffer")
+        ctx.reject(Http413, ProtocolViolated, "content-length exceeds buffer")
         return false
       ctx.contentlength = n
   let http10 = ctx.requestLineIsHttp10()
   ctx.http10 = http10
-  let conn = ctx.headers["connection"].toLowerAscii()
+  let ni = ctx.wantedIdx.conn
+  let hasClose = ctx.headerLen[ni] > 0 and
+    ctx.request.hasTokenIn(ctx.headerStart[ni], ctx.headerLen[ni], "close")
+  let hasKeep = ctx.headerLen[ni] > 0 and
+    ctx.request.hasTokenIn(ctx.headerStart[ni], ctx.headerLen[ni], "keep-alive")
   # RFC 7230 §6.6: `close` wins over `keep-alive` when both tokens appear.
-  ctx.keepAlive = if http10:
-      hasConnToken(conn, "keep-alive") and not hasConnToken(conn, "close")
-    else:
-      not hasConnToken(conn, "close")
+  ctx.keepAlive = if http10: hasKeep and not hasClose else: not hasClose
   true
 
 # --- accessors --------------------------------------------------------------
@@ -227,6 +271,65 @@ proc isBody*(ctx: HttpContext, body: string): bool =
 proc getRequest*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.requestlen]
 
+proc pathSpan*(ctx: HttpContext): HttpSpan =
+  if ctx.urilen == 0: return HttpSpan()
+  if ctx.queryAt == -2:                  # not scanned yet for this request
+    ctx.queryAt = -1
+    for i in 0 ..< ctx.urilen.int:
+      if ctx.request[ctx.uristart + i] == '?':
+        ctx.queryAt = i.int32
+        break
+  if ctx.queryAt < 0:
+    HttpSpan(start: ctx.uristart, len: ctx.urilen)
+  else:
+    HttpSpan(start: ctx.uristart, len: ctx.queryAt.int64)
+
+proc querySpan*(ctx: HttpContext): HttpSpan =
+  let p = pathSpan(ctx)
+  if p.len == 0 or p.len >= ctx.urilen: return HttpSpan()
+  let qstart = p.start + p.len + 1
+  HttpSpan(start: qstart, len: ctx.urilen - p.len - 1)
+
+proc queryParam*(ctx: HttpContext, name: string): HttpSpan =
+  let q = querySpan(ctx)
+  if q.len == 0: return HttpSpan()
+  var i = 0
+  while i < q.len.int:
+    var j = i
+    while j < q.len.int and ctx.request[q.start.int + j] != '&': inc j
+    var e = i
+    while e < j and ctx.request[q.start.int + e] != '=': inc e
+    if e - i == name.len and (name.len == 0 or ctx.request.bytesEq(q.start + i, name)):
+      if e < j:
+        return HttpSpan(start: q.start + e + 1, len: (j - e - 1).int64)
+      return HttpSpan()
+    i = j + 1
+  HttpSpan()
+
+proc compactRequest*(ctx: HttpContext, server: HttpServer) =
+  ## Move any pipelined tail to the front of the header-sized buffer. A buffer
+  ## that grew beyond header size is replaced once the tail fits.
+  let hdrCap = min(server.maxheaderlength, server.bufferlength).int + 1
+  let tailStart = ctx.bodyEnd
+  let tailLen = ctx.requestlen - tailStart
+  if tailLen <= 0:
+    if ctx.request.len > hdrCap:
+      ctx.request = newString(hdrCap)
+    ctx.requestlen = 0
+    return
+  if tailLen > hdrCap:
+    return
+  if ctx.request.len <= hdrCap:
+    if tailStart > 0:
+      moveMem(addr ctx.request[0], addr ctx.request[tailStart], tailLen)
+  else:
+    let nb = newString(hdrCap)
+    copyMem(addr nb[0], addr ctx.request[tailStart], tailLen)
+    ctx.request = nb
+  ctx.requestlen = tailLen
+  ctx.carryLen = 0
+  ctx.carryStart = 0
+
 # --- per-request state ------------------------------------------------------
 
 proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
@@ -235,8 +338,7 @@ proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
     ctx.requestlen = ctx.carryLen
     ctx.carryLen = 0
     ctx.carryStart = 0
-  else:
-    ctx.requestlen = 0
+  # else: pipelined tail may already sit at [0..requestlen) after compactRequest
   ctx.contentlength = 0
   ctx.uristart = 0
   ctx.urilen = 0
@@ -247,8 +349,14 @@ proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
   ctx.bodyClockSet = false
   ctx.keepAlive = true
   ctx.http10 = false
-  for key in ctx.wanted:
-    ctx.headers[key].setLen(0)
+  ctx.queryAt = -2
+  ctx.responded = false
+  ctx.headOnly = false
+  ctx.idleExpired = false
+  for i in 0 ..< ctx.wanted.len:
+    ctx.headerStart[i] = -1
+    ctx.headerLen[i] = 0
+    ctx.headers[ctx.wanted[i]].setLen(0)
 
 proc recordCarry*(ctx: HttpContext, server: HttpServer) =
   let reqEnd = ctx.bodyEnd
@@ -273,7 +381,7 @@ proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
     let limit = min(1 + server.maxheaderlength, ctx.request.len.int64)
     let maxRead = (limit - ctx.requestlen).int
     if maxRead <= 0:
-      ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
+      ctx.reject(Http431, ProtocolViolated, "request header fields too large")
       return false
     let prev = ctx.requestlen.int
     let ret = ctx.recvSome(addr ctx.request[ctx.requestlen], maxRead)
@@ -285,11 +393,11 @@ proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
     ctx.requestlen += ret
     if ctx.isHeaderreceived(prev, ctx.requestlen.int):
       if ctx.bodystart > server.maxheaderlength:
-        ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
+        ctx.reject(Http431, ProtocolViolated, "request header fields too large")
         return false
       return true
     if ctx.requestlen > server.maxheaderlength:
-      ctx.closeHttpSocket(ProtocolViolated, "maximum allowed header size exceeded")
+      ctx.reject(Http431, ProtocolViolated, "request header fields too large")
       return false
     if timedOut(server, t0):
       ctx.closeHttpSocket(TimedOut, "request header too slow")
@@ -303,6 +411,12 @@ proc readHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   ctx.contentreceived = ctx.requestlen - ctx.bodystart
   if not ctx.processHeaders(server):
     return false
+  # 100 Continue is flushed before the body is read, only when not already
+  # buffered, and never to an HTTP/1.0 client.
+  if ctx.headerLen[ctx.wantedIdx.expect] > 0 and not ctx.http10 and
+      ctx.contentlength > 0 and ctx.contentreceived < ctx.contentlength:
+    if not ctx.replyContinue100():
+      return false
   # Body bytes already on the wire when framing became known start the
   # per-request body-receive clock (see readBodyChunk/receiveToSingleBuffer).
   if ctx.contentreceived > 0:

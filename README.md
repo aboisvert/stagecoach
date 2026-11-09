@@ -47,7 +47,7 @@ wait(server)                         # aliases: join(server, ...)
 
 Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
-Server knobs (set before `serve`): `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets so small/chunked replies are not delayed by Nagle; `sockettimeoutms` (default 5000) bounds any single read/write; `requestTimeoutms` (default 30000) bounds the total time to receive a header or Compact body.
+Server knobs (set before `serve`): `backlog` (default 4096) is the listen queue depth; `idleTimeoutms` (default 30000, `<= 0` disables) closes a connection that has not started a request; `sockettimeoutms` (default 5000) bounds any single in-progress read/write once bytes have arrived; `requestTimeoutms` (default 30000) bounds total header/body receive time (slowloris); `sendDate` (default off) adds a `Date` header (cached per thread, refreshed once a second); `replyFile` streams a regular file after flushing any held reply; `headerValue` / `pathSpan` / `querySpan` / `queryParam` slice the request buffer without extra copies. On Linux, accepted sockets use a persistent edge-triggered `PollFd` in the vendored `stagelane` tree (apply `patches/stagelane-pollfd.patch` to `deps/stagelane` after `atlas install`; CI does this). `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets.
 
 Per-server lifecycle: `stop(srv, drainms = 10_000)` stops that one server—
 stops accepting, lets connection tasks finish for `drainms` ms, then

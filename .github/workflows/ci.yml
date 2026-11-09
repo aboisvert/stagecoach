@@ -1,0 +1,22 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: stable
+      - name: Install stagelane and apply the PollFd patch
+        run: |
+          mkdir -p deps
+          git clone https://github.com/ghazalialshafi/stagelane deps/stagelane
+          git -C deps/stagelane checkout f72f1ea
+          git -C deps/stagelane apply ../../patches/stagelane-pollfd.patch
+      - uses: extractions/setup-just@v2
+      - run: just test-unit
+      - run: just test-integration

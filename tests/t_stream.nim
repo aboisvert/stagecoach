@@ -1,5 +1,6 @@
 import std/[unittest, net, os, osproc, strutils, times]
 import std/nativesockets
+import helpers/rawclient
 
 const testPort = 18093
 
@@ -7,7 +8,7 @@ var serverProc: Process
 
 proc startTestServer() =
   let root = getCurrentDir()
-  doAssert execCmd("nim c --hints:off -o:" & root & "/bin/support_stream " &
+  doAssert execCmd("nim c --hints:off --threads:on -o:" & root & "/bin/support_stream " &
     root & "/tests/support_stream.nim") == 0
   serverProc = startProcess(root & "/bin/support_stream", options = {poUsePath, poStderrToStdout})
   for _ in 0 ..< 200:
@@ -66,9 +67,13 @@ suite "streaming body timeouts":
     stopTestServer()
 
   test "a fast streaming body completes":
-    let head = "POST / HTTP/1.1\c\LContent-Length: 20\c\LHost: t\c\L\c\L"
-    let (resp, _) = dribble(@[head, "0123456789" & "0123456789"])
-    check "ok n=" in resp
+    let c = connectRaw(testPort)
+    defer: c.close()
+    let payload = "POST / HTTP/1.1\c\LContent-Length: 20\c\LHost: t\c\L\c\L" &
+      ("0123456789" & "0123456789")
+    check c.trySend(payload)
+    let r = c.readResponse()
+    check "ok n=" in r.body
 
   test "dribbling body is cut at requestTimeoutms":
     # Body bytes arrive one at a time: each gap is far inside

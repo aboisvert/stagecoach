@@ -30,7 +30,8 @@ suite "NoBody mode":
     let smuggled = "GET /smuggled HTTP/1.1\r\nHost: t\r\n\r\n"
     c.sendRaw "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: " & $smuggled.len & "\r\n\r\n" & smuggled
     var r1: Resp
-    check not c.tryReadResponse(r1)      # rejected: never answered, never parsed as a request
+    check c.tryReadResponse(r1)
+    check r1.status == 400
     check stillServes()
 
 suite "Streaming mode":
