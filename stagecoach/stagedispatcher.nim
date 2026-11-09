@@ -22,6 +22,9 @@ from coachserver import shutdownCallbacks, isShuttingDown, log
 export httpservercore
 
 when defined(linux):
+  # numbers straight from the Linux headers (<asm-generic/socket.h>: SO_REUSEPORT,
+  # <netinet/tcp.h>: TCP_DEFER_ACCEPT); macOS supports neither, so the
+  # definitions are guarded and makeListener uses plain listenTcp there
   const SO_REUSEPORT = 15
   const TCP_DEFER_ACCEPT = 9
 
@@ -82,6 +85,9 @@ proc setNoDelay(fd: SocketHandle) =
 
 proc pokeAllShutdownPipes() {.nimcall, raises: [].} =
   {.cast(gcsafe).}:
+    # Runs on the SIGINT/SIGTERM path (coachserver.shutdown -> shutdownCallbacks):
+    # keep it async-signal-safe - only write(2), no locks, logging or allocation.
+    # The bytes are consumed by the acceptWatcher task under normal stop().
     for rt in httpRuntimes:
       for (wfd, _) in rt.shutdownPipes:
         var b: array[1, char] = ['x']
@@ -141,6 +147,8 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
 
 proc newWorker*(rt: HttpRuntime, nThreads: int): Worker =
   let s = rt.httpServer
+  # ceil-divide: the per-connection/inflight caps must sum to the whole limit
+  # across workers (integer division alone would lose the remainder permits)
   let permits = max(1, (s.maxConnections + nThreads - 1) div nThreads)
   Worker(
     connSem: newSemaphore(permits),
@@ -242,6 +250,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         ctx.socket = clientFd
       else:
         ctx = httpSrv.newHttpContext(clientFd)
+      # a session holds replies in sendBuf so pipelined replies coalesce into
+      # one write when the last one completes (see flushSendBuf/endRequest)
       ctx.holdWrites = true
       try:
         # A child must not inherit an accepted connection.
@@ -277,6 +287,8 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           if not ctx.responded:
             ctx.reject(Http500, Excepted, "handler sent no reply")
             break
+          # flush while held bytes are still modest so a run of pipelined
+          # replies never grows sendBuf by megabytes (endRequest flushes too)
           if ctx.sendBuf.len > 32 * 1024:
             if ctx.flushSendBuf() == Fail:
               break
@@ -339,7 +351,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         let worker = newWorker(w.runtime, w.nThreads)
         run workerMain(w.runtime, w.idx, worker)
         when defined(linux):
-          pioDrain()
+          pioDrain()             # free the thread's recycled PollFd handles + helper epoll
 
     rt.threads.setLen(nThreads)
     for i in 0 ..< nThreads:

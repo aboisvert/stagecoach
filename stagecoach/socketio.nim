@@ -2,6 +2,14 @@
 ## retry loop, one errno -> close-cause map, and the per-op socket-timeout
 ## wrapper. `httprequest` and `httpresponse` drive this module; they keep no
 ## retry logic of their own.
+##
+## PollFd discipline (Linux): the persistent edge-triggered PollFd latches
+## read/write readiness between syscalls. The event handler sets a bit and
+## wakes any parked waiter; the I/O code HERE must clear the bit when the
+## socket drained (EAGAIN, or a short read/write - either proves the stream
+## is empty/full for now) BEFORE the next pioWaitRead/pioWaitWrite, else
+## that wait returns at once and the caller busy-loops. `pioOpen` starts
+## with both bits set: try the syscall first, park only on EAGAIN.
 
 import std/[os, posix]
 import stagelane/core
@@ -11,9 +19,8 @@ import httpservercore
 from coachserver import SocketCloseCause, isShuttingDown, logClose
 when defined(linux):
   from stagelane/sched import PollFd, pioOpen, pioClose, pioWaitRead, pioWaitWrite
-from posix import MSG_NOSIGNAL
 
-const flushSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT
+const flushSendFlags = httpservercore.MSG_NOSIGNAL or MSG_DONTWAIT
 
 proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "")
 
@@ -42,6 +49,8 @@ proc classifyRecv*(ret: int, cause: var SocketCloseCause, msg: var string): Sock
 
 proc checkRecv*(ctx: HttpContext, ret: int): SocketState =
   ## `classifyRecv`, closing the socket on failure.
+  # A zero-byte read after the idle timer shut the socket down (see
+  # waitSocketReadable) is the idle timeout, not a normal peer close.
   if ret == 0 and ctx.idleExpired:
     closeHttpSocket(ctx, TimedOut, "idle")
     return Fail
@@ -52,6 +61,10 @@ proc checkRecv*(ctx: HttpContext, ret: int): SocketState =
     closeHttpSocket(ctx, cause, msg)
 
 template withSocketTimeout(ctx: HttpContext, waitCall: untyped) =
+  ## Bound one parked wait by `sockettimeoutms`: a lazily-armed timer cancels
+  ## the CURRENT task `ms` after arming, which interrupts the parked
+  ## `waitCall`; the `finally` disarms it when the wait returns first.
+  ## An expired timer leaves the socket untouched - the caller classifies.
   let ms = ctx.server.sockettimeoutms
   if ms <= 0:
     waitCall
@@ -110,6 +123,8 @@ proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): Socke
       sent += ret
       when defined(linux):
         if ctx.pf != nil and sent < length:
+          # partial send: kernel buffer filled, drop the latched write
+          # readiness so the upcoming wait actually parks
           cast[PollFd](ctx.pf).wrReady = false
       continue
     if ret < 0:
@@ -118,7 +133,7 @@ proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): Socke
         continue
       if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
         when defined(linux):
-          if ctx.pf != nil: cast[PollFd](ctx.pf).wrReady = false
+          if ctx.pf != nil: cast[PollFd](ctx.pf).wrReady = false   # see the header note
         ctx.waitSocketWritable()
         continue
       closeHttpSocket(ctx, NetErrored, osErrorMsg(e))
@@ -132,6 +147,9 @@ proc flushSendBuf*(ctx: HttpContext): SocketState {.flow.} =
     return Complete
   var buf = move ctx.sendBuf
   result = ctx.sendSome(unsafeAddr buf[0], buf.len, flushSendFlags)
+  # hand small buffers back for the next reply, drop big ones so pooled
+  # contexts do not retain multi-hundred-KB response buffers (both are
+  # re-grown on demand)
   if result != Fail and buf.len < 65536:
     ctx.sendBuf = buf
     ctx.sendBuf.setLen(0)
@@ -149,6 +167,8 @@ proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
     if r >= 0:
       when defined(linux):
         if ctx.pf != nil and (r < n or r == 0):
+          # short read (or EOF): the socket is drained, clear the latch so
+          # the next wait parks instead of returning immediately
           cast[PollFd](ctx.pf).rdReady = false
       return r
     let e = osLastError().int
@@ -156,7 +176,7 @@ proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
       continue
     if e in [EAGAIN.int, EWOULDBLOCK.int]:
       when defined(linux):
-        if ctx.pf != nil: cast[PollFd](ctx.pf).rdReady = false
+        if ctx.pf != nil: cast[PollFd](ctx.pf).rdReady = false   # see the header note
       ctx.waitSocketReadable()
     else:
       return r
@@ -186,6 +206,8 @@ proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
     if ctx.pf != nil:
       let p = cast[PollFd](ctx.pf)
       ctx.pf = nil
+      # log/callback fire before pioClose: pioClose performs the real
+      # close(2) and recycles the handle, making `fd` invalid
       logClose(ctx.server, fd, cause, msg)
       if not isNil(ctx.server.onCloseSocketCallback):
         ctx.server.onCloseSocketCallback(ctx.server, fd, cause, msg)

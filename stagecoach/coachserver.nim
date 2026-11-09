@@ -6,7 +6,7 @@ from std/strutils import replace
 
 export SocketHandle, INVALID_SOCKET, posix.`==`, Level
 
-const LogColors = ["\e[90m", "\e[36m", "\e[32m", "\e[34m", "\e[33m", "\e[31m", "\e[35m", "\e[35m"]
+const LogColors = ["\e[90m", "\e[36m", "\e[32m", "\e[34m", "\e[33m", "\e[31m", "\e[35m", "\e[35m"]  # indexed by Level: 8 values (lvlAll..lvlNone)
 template LogLevel*(thelevel: untyped): untyped = Level {.deprecated: "use Level (std/logging) instead of LogLevel".}
 const lvlTRACE* = lvlAll
 
@@ -42,6 +42,9 @@ type
 var
   shuttingdown*: Atomic[bool]
   nextid: Atomic[int]
+  # every callback registered here runs inside shutdown() on the SIGINT/SIGTERM
+  # path: keep them async-signal-safe (only write(2) and atomics, no locks,
+  # no logging, no allocation - see pokeAllShutdownPipes in stagedispatcher)
   shutdownCallbacks* {.global.}: seq[proc() {.nimcall, raises: [].}]
 
 proc isShuttingDown*(): bool {.inline.} = shuttingdown.load(moRelaxed)

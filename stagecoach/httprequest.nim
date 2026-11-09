@@ -29,6 +29,8 @@ proc isTchar(c: char): bool {.inline.} =
       c in {'0' .. '9'} or c.isAlphaAscii()
 
 proc parseMethod*(ctx: HttpContext): bool =
+  # 13 == "X / HTTP/1.0\c": the shortest byte run that can possibly contain a
+  # full request line up to its CR, so anything shorter is 400 without a scan.
   if unlikely(ctx.requestlen < 13):
     ctx.reject(Http400, ProtocolViolated, "too short request")
     return false
@@ -73,6 +75,8 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
 # --- headers ----------------------------------------------------------------
 
 proc isHeaderreceived*(ctx: HttpContext, previouslen, currentlen: int): bool =
+  ## True at the first `\c\l\c\l`. Resumes 4 bytes before `previouslen`
+  ## so a terminator straddling the previous scan's end is still seen.
   if currentlen < 4:
     return false
   var i = if previouslen > 4: previouslen - 4 else: 0
@@ -182,6 +186,8 @@ proc parseHeaders*(ctx: HttpContext): bool =
   true
 
 proc requestLineIsHttp10(ctx: HttpContext): bool =
+  ## Scans the raw bytes for the version, independent of parseRequestLine:
+  ## framing/keep-alive must see HTTP/1.0 even with `parserequestline = false`.
   var e = 0
   while e < ctx.bodystart and ctx.request[e] != '\c':
     inc e
@@ -208,6 +214,7 @@ proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
       var bad = false
       for k in 0 ..< ctx.headerLen[ci].int:
         let c = ctx.request[ctx.headerStart[ci].int + k]
+        # stop before the 10n + digit multiply can overflow int64
         if c notin {'0' .. '9'} or n > (high(int64) - 9) div 10:
           bad = true
           break
@@ -329,10 +336,13 @@ proc compactRequest*(ctx: HttpContext, server: HttpServer) =
   let tailLen = ctx.requestlen - tailStart
   if tailLen <= 0:
     if ctx.request.len > hdrCap:
-      ctx.request = newString(hdrCap)
+      ctx.request = newString(hdrCap)      # shrink the grown buffer back
     ctx.requestlen = 0
     return
   if tailLen > hdrCap:
+    # tail does not fit the header-sized buffer: leave everything in place.
+    # recordCarry has already marked the tail (carryStart/carryLen), and
+    # prepareHttpContext moves it byte-in-place when the next request starts.
     return
   if ctx.request.len <= hdrCap:
     if tailStart > 0:
@@ -371,6 +381,9 @@ proc prepareHttpContext*(ctx: HttpContext, server: HttpServer) =
   for i in 0 ..< ctx.wanted.len:
     ctx.headerStart[i] = -1
     ctx.headerLen[i] = 0
+    # clear captured values from the previous request so a header present in
+    # an earlier request cannot leak into a later request that omits it
+    # (parseHeaders repopulates only headers it actually sees)
     ctx.headers[ctx.wanted[i]].setLen(0)
 
 proc recordCarry*(ctx: HttpContext, server: HttpServer) =
@@ -393,6 +406,8 @@ proc receiveHeader*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   while true:
     if not serverIsOpen(server):
       return false
+    # never hand recv more than the buffer can hold: request.len may be the
+    # header cap exactly (and may be below maxheaderlength after buffer shrink)
     let limit = min(1 + server.maxheaderlength, ctx.request.len.int64)
     let maxRead = (limit - ctx.requestlen).int
     if maxRead <= 0:

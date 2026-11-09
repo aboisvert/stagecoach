@@ -3,17 +3,19 @@ import stagelane/core
 import stagelane/transform
 import httpservercore
 import socketio
-from posix import MSG_NOSIGNAL
 import httpcore
 from coachserver import SocketCloseCause, isShuttingDown
 when defined(linux):
   from stagelane/sched import PollFd
 
-const lastSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT
-const moreSendFlags = MSG_NOSIGNAL + MSG_DONTWAIT + MSG_MORE
+const lastSendFlags = httpservercore.MSG_NOSIGNAL or MSG_DONTWAIT
+const moreSendFlags = lastSendFlags or MSG_MORE
 
 const
   version = "HTTP/1.1 "
+  # canned replies for the hot paths: no Date (sendDate is opt-in) and no
+  # keep-alive advertising - for HTTP/1.1 persistence is implicit, and
+  # HTTP/1.0 get the explicit Connection: keep-alive line from the general path
   http200nocontent = "HTTP/1.1 200 OK\c\LContent-Length: 0\c\L\c\L"
   http204string = "HTTP/1.1 204 No Content\c\L\c\L"
   keepAliveHeader = "Connection: keep-alive"
@@ -23,6 +25,8 @@ const
   zerocontent = "Content-Length: 0\c\L"
 
 proc writeToSocket*(ctx: HttpContext, text: string, flags: cint): SocketState {.flow.} =
+  ## Despite the name, this sends the WHOLE `text` (sendSome parks until sent)
+  ## and returns Fail on any error. Empty text is a Complete no-op.
   if text.len == 0:
     return Complete
   ctx.sendSome(unsafeAddr text[0], text.len, flags)
@@ -194,7 +198,7 @@ proc replyFinishChunked*(ctx: HttpContext): bool {.flow.} =
 
 proc mimeOf(path: string): string =
   let ext = splitFile(path).ext
-  if ext.len < 2: return "application/octet-stream"
+  if ext.len < 2: return "application/octet-stream"   # no extension (or a bare ".")
   case ext[1 .. ^1].toLowerAscii()
   of "html", "htm": "text/html; charset=utf-8"
   of "css": "text/css"

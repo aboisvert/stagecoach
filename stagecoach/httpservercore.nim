@@ -7,6 +7,10 @@ export coachserver
 
 type
   WantedIdx* = object
+    ## Indexes of the four always-tracked framing headers within
+    ## `ctx.wanted`/`ctx.headerStart`/`ctx.headerLen`. newHttpContext appends
+    ## connection/transfer-encoding/expect/content-length (dedup'ed), so the
+    ## indexes are stable and -1 never occurs here.
     conn*, te*, expect*, cl*: int
 
   HttpSpan* = object
@@ -94,7 +98,10 @@ type
     headers*: StringTableRef
     userFields*: int       ## first N entries of `wanted` are user-requested (copied to `headers`)
     wantedIdx*: WantedIdx
-    queryAt*: int32        ## offset of '?' within the target, or -1
+    queryAt*: int32        ## '?'-span state machine: -2 not scanned yet,
+                           ## -1 scanned and no '?' in the current target,
+                           ## else the target-relative offset of '?'
+                           ## (pathSpan scans lazily; prepareHttpContext resets to -2)
     headerStart*: seq[int32]
     headerLen*: seq[int32]
     keepAlive*: bool
@@ -109,6 +116,10 @@ type
     pf*: pointer            ## Linux PollFd when the persistent epoll path is active; else nil
 
 const
+  # platform numerals: macOS (BSD)'s MSG_DONTWAIT is 0x80, Linux' is 0x40;
+  # MSG_NOSIGNAL (no SIGPIPE on a dead peer) and MSG_MORE (cork the socket so
+  # small sends coalesce) exist only on Linux
+  MSG_NOSIGNAL* = when defined(linux): 0x4000.cint else: 0.cint
   MSG_DONTWAIT* = when defined(macosx): 0x80.cint else: 0x40.cint
   MSG_MORE* = when defined(linux): 0x8000.cint else: 0.cint
 
