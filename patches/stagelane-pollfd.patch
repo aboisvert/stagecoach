@@ -37,7 +37,7 @@ index 9477279..eee4794 100644
  
  
  var theSched {.threadvar.}: Scheduler
-@@ -633,7 +641,171 @@ proc waitWritable*(fd: int) {.flowCtor: writeCtor, inlineSuspend: writeHook.} =
+@@ -633,7 +641,173 @@ proc waitWritable*(fd: int) {.flowCtor: writeCtor, inlineSuspend: writeHook.} =
    ## suspend until `fd` is writable
    blockOn(writeCtor(fd))
  
@@ -191,6 +191,8 @@ index 9477279..eee4794 100644
 +          p.wr = nil; dec s.fdWaiting; dec s.pioWaiting
 +          wake(w)
 +
++
++proc pollLegacy(s: Scheduler, timeoutMs: int)
 +
  proc pollIo(s: Scheduler, timeoutMs: int) =
 +  when defined(linux):

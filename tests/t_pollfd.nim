@@ -1,7 +1,13 @@
 when defined(linux):
   import std/[unittest, posix, nativesockets]
+  import stagecoach/flow
   import stagelane/sched
-  import helpers/pairs
+  proc waitReadFlow(p: PollFd) {.flow.} =
+    pioWaitRead(p)
+
+  proc parkOnRead(p: PollFd, parked: ptr bool) {.flow.} =
+    waitReadFlow(p)
+    parked[] = true
 
   suite "PollFd latch":
     test "read readiness clears after a short recv":
@@ -10,22 +16,19 @@ when defined(linux):
       let a = fds[0]
       let b = fds[1]
       var pf = pioOpen(b)
-      check pioWaitRead(pf)           # both bits start set
+      pioWaitRead(pf)                 # both bits start set
       let msg = "x"
-      discard send(a, unsafeAddr msg[0], msg.len, 0)
-      check pioWaitRead(pf)
+      discard send(SocketHandle(a), unsafeAddr msg[0], msg.len, 0.cint)
+      pioWaitRead(pf)
       var buf: array[8, char]
-      let r = recv(b, addr buf[0], buf.len, 0)
+      let r = recv(SocketHandle(b), addr buf[0], buf.len, 0.cint)
       check r == 1
       pf.rdReady = false
       var parked = false
-      let t = go:
-        pioWaitRead(pf)
-        parked = true
+      let t = go parkOnRead(pf, addr parked)
       delay(30)
       check not parked
       cancel(t)
-      joinAll([t], 1000)
       discard posix.close(a)
       pioClose(pf)
       discard posix.close(b)
