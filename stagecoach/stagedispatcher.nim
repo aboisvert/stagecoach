@@ -92,6 +92,21 @@ system.add(shutdownCallbacks, pokeAllShutdownPipes)
 const defaultConnLimit* = 1024
 const defaultInflightLimit* = 64
 
+proc closeRuntimeFds(rt: HttpRuntime) =
+  ## Closes a runtime's listeners and shutdown pipes. Used by `teardownRuntime`
+  ## after threads joined and by `setupRuntime` when its own partial attempt
+  ## must be freed (nothing was registered or exposed yet).
+  for (wfd, rfd) in rt.shutdownPipes:
+    discard posix.close(wfd)
+    discard posix.close(rfd)
+  rt.shutdownPipes.setLen(0)
+  for l in rt.listeners:
+    discard posix.close(l.fd)
+  rt.listeners.setLen(0)
+  if not rt.sharedListener.isNil:
+    discard posix.close(rt.sharedListener.fd)
+    rt.sharedListener = nil
+
 proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: int): HttpRuntime =
   ## Builds the runtime for one `serve` call. Re-runnable: a previous run's
   ## resources are torn down again in `wait`.
@@ -104,16 +119,21 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
   result = HttpRuntime(httpServer: srv)
   # sendfile has no MSG_NOSIGNAL; a reset peer must not kill the process.
   signal(SIGPIPE, SIG_IGN)
-  for i in 0 ..< nThreads:
-    when defined(linux):
-      result.listeners.add makeListener(port, srv.backlog, srv.nodelay)
-    else:
-      if i == 0: result.sharedListener = listenTcp(port, "0.0.0.0", normalizeBacklog(srv.backlog))
-    var fds: array[2, cint]
-    if pipe(fds) != 0:
-      raiseOSError(osLastError())
-    discard fcntl(fds[0], F_SETFL, O_NONBLOCK)
-    result.shutdownPipes.add (fds[1], fds[0])
+  try:
+    for i in 0 ..< nThreads:
+      when defined(linux):
+        result.listeners.add makeListener(port, srv.backlog, srv.nodelay)
+      else:
+        if i == 0: result.sharedListener = listenTcp(port, "0.0.0.0", normalizeBacklog(srv.backlog))
+      var fds: array[2, cint]
+      if pipe(fds) != 0:
+        raiseOSError(osLastError())
+      discard fcntl(fds[0], F_SETFL, O_NONBLOCK)
+      result.shutdownPipes.add (fds[1], fds[0])
+  except CatchableError:
+    # Nothing was registered yet: free what this failed attempt created.
+    closeRuntimeFds(result)
+    raise
   httpRuntimes.add result
   srv.runtime = result
   srv.started = true
@@ -192,13 +212,7 @@ proc teardownRuntime(srv: HttpServer) =
   let rt = srv.runtime
   if rt.isNil:
     return
-  for (wfd, rfd) in rt.shutdownPipes:
-    discard posix.close(wfd)
-    discard posix.close(rfd)
-  for l in rt.listeners:
-    discard posix.close(l.fd)
-  if not rt.sharedListener.isNil:
-    discard posix.close(rt.sharedListener.fd)
+  closeRuntimeFds(rt)
   for i, cand in httpRuntimes:
     if cand == rt:
       httpRuntimes.delete(i)

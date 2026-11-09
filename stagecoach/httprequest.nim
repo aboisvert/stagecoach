@@ -274,6 +274,9 @@ proc getRequest*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.requestlen]
 
 proc pathSpan*(ctx: HttpContext): HttpSpan =
+  ## Borrowed path portion of the request target (target up to `'?'`).
+  ## Result points into `ctx.request`; valid until `prepareHttpContext` or
+  ## `compactRequest`. `'?'` itself is excluded; no URL decoding is done.
   if ctx.urilen == 0: return HttpSpan()
   if ctx.queryAt == -2:                  # not scanned yet for this request
     ctx.queryAt = -1
@@ -287,12 +290,22 @@ proc pathSpan*(ctx: HttpContext): HttpSpan =
     HttpSpan(start: ctx.uristart, len: ctx.queryAt.int64)
 
 proc querySpan*(ctx: HttpContext): HttpSpan =
+  ## Borrowed query portion of the request target (`'?'` excluded, spans
+  ## everything after it, `'&'`-separated). Empty when the target has no
+  ## query. Valid until `prepareHttpContext` or `compactRequest`.
   let p = pathSpan(ctx)
   if p.len == 0 or p.len >= ctx.urilen: return HttpSpan()
   let qstart = p.start + p.len + 1
   HttpSpan(start: qstart, len: ctx.urilen - p.len - 1)
 
 proc queryParam*(ctx: HttpContext, name: string): HttpSpan =
+  ## Borrowed value span of the FIRST `'&'`-separated `key=value` segment of
+  ## the query whose key compares byte-wise equal to `name` (pinned by the
+  ## URL-and-header-spans suite). Deliberately not decoded or split further:
+  ## a key with no `'='` (`key`), an empty value (`key=`), and an unknown
+  ## key all yield the empty span, and only the first match counts even if
+  ## a later occurrence carries a value. Use the span to copy or slice the
+  ## value into your own representation.
   let q = querySpan(ctx)
   if q.len == 0: return HttpSpan()
   var i = 0

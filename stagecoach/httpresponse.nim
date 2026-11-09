@@ -276,7 +276,9 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
       while left > 0:
         let n = min(left, fileReadSize.int64).int
         let got = posix.read(fd, addr buf[0], n)
-        if got < 0: return ctx.abortFile("file read error")
+        if got < 0:
+          if osLastError().int == EINTR.int: continue    # interrupted, the file is unchanged
+          return ctx.abortFile("file read error")
         if got == 0: return ctx.abortFile("file truncated while sending")
         if ctx.sendSome(addr buf[0], got, lastSendFlags) == Fail:
           return false
