@@ -33,3 +33,19 @@ stress:
 # compile every example without running it
 examples:
     for f in examples/*.nim; do nim c --hints:off --threads:on --outdir:bin "$f" || exit 1; done
+
+# Linux tests on macOS via Docker
+linux-build:
+    scripts/linux-test.sh build
+
+linux-test *args:
+    scripts/linux-test.sh test {{args}}
+
+linux-shell:
+    scripts/linux-test.sh shell
+
+linux-bench *args:
+    scripts/linux-test.sh bench {{args}}
+
+linux-clean:
+    scripts/linux-test.sh clean

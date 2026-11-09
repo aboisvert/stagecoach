@@ -1,0 +1,23 @@
+services:
+  linux:
+    image: stagecoach-linux
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        UID: ${HOST_UID:-1000}
+        GID: ${HOST_GID:-1000}
+    platform: ${PLATFORM:-}
+    working_dir: /work
+    volumes:
+      - .:/work
+      - nimcache:/home/dev/.cache/nim
+      - nimble:/home/dev/.nimble
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    cap_add: [SYS_PTRACE]   # gdb / valgrind
+    tty: true
+    stdin_open: true
+volumes:
+  nimcache:
+  nimble:

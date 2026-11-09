@@ -81,6 +81,19 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 - [`stagecoach/coachserver`](stagecoach/coachserver.nim) — logging, `shutdown()`, close causes
 - [`stagecoach/flow`](stagecoach/flow.nim) — stagelane `{.flow.}` support for your handlers
 
+## Running Linux tests on macOS (Docker)
+
+Use a Linux container to run the full test suite (including real PollFd tests on Linux) and query benchmarks from macOS:
+
+```
+just linux-test        # build image, set up deps/stagelane, run `just test` suites
+just linux-shell       # interactive shell with the repo mounted at /work
+just linux-bench       # compile querybench + hey (env: REQUESTS, CONCURRENCY)
+just linux-clean       # remove image and cache volumes
+```
+
+`scripts/linux-test.sh <build|test|shell|bench|clean>` works without `just`. The container is native arm64 on Apple Silicon; set `PLATFORM=linux/amd64` to force emulated x86_64. Benchmarks inside Docker Desktop's VM are for sanity only, not bare-metal numbers. Tests write binaries into `bin/` on the mounted tree (gitignored); `linux-bench` keeps its binary under `/tmp` in the container. Each `linux-test` / `linux-bench` run resets `deps/stagelane` to the CI commit and reapplies `patches/stagelane-pollfd.patch`.
+
 ## Testing
 
 ```

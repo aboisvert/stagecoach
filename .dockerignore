@@ -1,0 +1,8 @@
+.git
+.cursor
+bin/
+deps/
+nimcache
+**/nimcache
+docs.out
+*.o
