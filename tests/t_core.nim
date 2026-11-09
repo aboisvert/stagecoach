@@ -48,6 +48,26 @@ suite "server defaults":
       discard newHttpServer(headerfields = ["Origin"])
     discard newHttpServer(headerfields = ["x-custom-1"])
 
+  test "more than 60 requested header fields are rejected":
+    # parseHeaders tracks seen wanted names in a 64-bit mask; 60 user fields
+    # plus the 4 always-tracked framing headers fill it exactly.
+    var fields: seq[string]
+    for i in 0 ..< 61: fields.add "x-f-" & $i
+    expect ValueError:
+      discard newHttpServer(headerfields = fields)
+    fields.setLen(60)
+    discard newHttpServer(headerfields = fields)
+    # the limit counts list entries (dedup happens later), so a list whose
+    # unique count is lower still has to fit the entry bound itself
+    var withFraming: seq[string] = fields[0 ..< 59] & "connection"
+    discard newHttpServer(headerfields = withFraming)
+
+  test "stop is a no-op before serve":
+    let s = fresh()
+    stop(s)
+    check not serverIsStopping(s)
+    check serverIsOpen(s)
+
 suite "context wanted set":
   test "framing headers are always tracked":
     for ct in [NoBody, Compact, Streaming]:

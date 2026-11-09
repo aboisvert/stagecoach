@@ -129,7 +129,9 @@ proc parseHeaders*(ctx: HttpContext): bool =
   while i < hdrEnd and ctx.request[i] != '\l':   # skip the request line
     inc i
   inc i
-  var seen = 0                            # bitmask: wanted names already matched
+  # 64-bit mask: at most 64 wanted names (60 user fields + 4 framing headers),
+  # enforced by newHttpServer; a wider mask would need per-name bookkeeping.
+  var seen: uint64 = 0                    # bitmask: wanted names already matched
   while i < hdrEnd:
     var eol = i
     while eol < hdrEnd and ctx.request[eol] != '\l':
@@ -154,7 +156,7 @@ proc parseHeaders*(ctx: HttpContext): bool =
       for wi in 0 ..< ctx.wanted.len:
         let w = ctx.wanted[wi]
         if eqLower(ctx.request, i, nameEnd - i, w):
-          let bit = 1 shl wi
+          let bit = 1'u64 shl wi
           if (seen and bit) != 0:
             # Only framing/identity headers are a smuggling risk; for other
             # requested headers the first occurrence wins.

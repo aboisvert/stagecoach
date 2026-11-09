@@ -194,6 +194,36 @@ suite "sendDate and replyFile":
 when isMainModule:
   echo "Response tests finished"
 
+suite "replyFile MIME types":
+  test "content types by extension (case-insensitive, unknown falls back)":
+    let exts = [
+      ("a.html", "text/html; charset=utf-8"), ("a.htm", "text/html; charset=utf-8"),
+      ("a.css", "text/css"), ("a.js", "text/javascript"), ("a.mjs", "text/javascript"),
+      ("a.json", "application/json"), ("a.txt", "text/plain; charset=utf-8"),
+      ("a.png", "image/png"), ("a.wasm", "application/wasm"),
+      ("A.HTML", "text/html; charset=utf-8"), ("a.UnknownEX7", "application/octet-stream"),
+      ("noext", "application/octet-stream")]
+    for (name, mime) in exts:
+      let path = getTempDir() / name
+      writeFile(path, $name.len)
+      var p = newPair(mkServer())
+      proc doFile(ctx: HttpContext) {.flow.} = discard ctx.replyFile(path)
+      run doFile(p.ctx)
+      let got = peerRecvAll(p.peer)
+      p.closePeer()
+      removeFile(path)
+      check got.startsWith("HTTP/1.1 200 OK")
+      check ("Content-Type: " & mime) in got
+      check got.endsWith($name.len)
+
+  test "replyFile on a directory fails without touching the socket":
+    let d = getTempDir()
+    var p = newPair(mkServer())
+    proc doDir(ctx: HttpContext) {.flow.} = check not ctx.replyFile(d)
+    run doDir(p.ctx)
+    check not p.ctx.responded
+    p.closePeer()
+
 suite "review regressions":
   test "HEAD stays body-less with parserequestline off":
     var s = newHttpServer(loglevel = lvlError, parserequestline = false)

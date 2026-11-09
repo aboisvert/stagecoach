@@ -411,5 +411,80 @@ suite "HTTP parsing: extended":
     check st == Complete
     check chunk == ""
 
+proc spanText(c: HttpContext, s: HttpSpan): string =
+  ## Materialize a borrowed span for assertions.
+  if s.len <= 0: return ""
+  c.request[s.start ..< s.start + s.len]
+
+suite "URL and header spans":
+  setup:
+    server = newHttpServer(loglevel = lvlError, parserequestline = true)
+    ctx = server.newHttpContext(INVALID_SOCKET)
+  test "path, query and parameter spans":
+    ctx.load "GET /a/b?x=1&y&z=%20&w=x=1&v&v=3 HTTP/1.1\c\L\c\L"
+    check ctx.parseRequestLine(server)
+    check spanText(ctx, ctx.pathSpan()) == "/a/b"
+    check spanText(ctx, ctx.querySpan()) == "x=1&y&z=%20&w=x=1&v&v=3"
+    check spanText(ctx, ctx.queryParam("x")) == "1"
+    check spanText(ctx, ctx.queryParam("z")) == "%20"
+    check spanText(ctx, ctx.queryParam("w")) == "x=1"   # '=' inside a value is value text
+    # key present with no '=' and empty value: both yield the empty span
+    check spanText(ctx, ctx.queryParam("y")) == ""
+    check spanText(ctx, ctx.queryParam("v")) == ""     # first occurrence has no '='
+
+  test "no query, empty query, named-only query":
+    ctx.load "GET /p HTTP/1.1\c\L\c\L"
+    check ctx.parseRequestLine(server)
+    check spanText(ctx, ctx.pathSpan()) == "/p"
+    check ctx.querySpan().len == 0
+    check ctx.queryParam("p").len == 0
+    ctx.prepareHttpContext(server)
+    ctx.load "GET /q? HTTP/1.1\c\L\c\L"
+    check ctx.parseRequestLine(server)
+    check spanText(ctx, ctx.pathSpan()) == "/q"
+    check ctx.querySpan().len == 0
+    ctx.prepareHttpContext(server)
+    ctx.load "GET /r?=v& HTTP/1.1\c\L\c\L"
+    check ctx.parseRequestLine(server)
+    check spanText(ctx, ctx.queryParam("")) == "v"   # the empty-name segment's value
+    check ctx.queryParam("v").len == 0
+
+  test "duplicated parameter names: first occurrence wins":
+    ctx.load "GET /d?k=1&k=2&j=3&j=4&k=5 HTTP/1.1\c\L\c\L"
+    check ctx.parseRequestLine(server)
+    check spanText(ctx, ctx.queryParam("k")) == "1"
+    check spanText(ctx, ctx.queryParam("j")) == "3"
+    check ctx.queryParam("nope").len == 0
+    check ctx.queryParam("k5").len == 0        # longer name matches no segment
+
+  test "spans point into the buffer of a later pipelined request":
+    # runtime concatenation keeps the buffer writable (a literal is read-only ROM)
+    let r1 = "GET /a?x=1 HTTP/1.1\c\L\c\L"
+    let r2 = "GET /b?y=2 HTTP/1.1\c\L\c\L"
+    ctx.load r1 & r2
+    check ctx.parseAll(server)
+    check spanText(ctx, ctx.pathSpan()) == "/a"
+    check spanText(ctx, ctx.queryParam("x")) == "1"
+    ctx.recordCarry(server)
+    let carried = ctx.carryLen
+    ctx.prepareHttpContext(server)
+    check ctx.requestlen == carried
+    check ctx.parseAll(server)
+    check spanText(ctx, ctx.pathSpan()) == "/b"      # uristart > 0 after the carry move
+    check spanText(ctx, ctx.queryParam("y")) == "2"
+    check ctx.queryParam("x").len == 0               # stale queryAt was reset for this request
+
+  test "headerSpan and headerValue on missing and unknown headers":
+    let s = newHttpServer(loglevel = lvlError, headerfields = ["x-a", "x-b"])
+    let c = s.newHttpContext(INVALID_SOCKET)
+    c.load "GET / HTTP/1.1\c\LX-A: one\c\LX-B:\c\L\c\L"
+    check c.parseAll(s)
+    let sp = c.headerSpan("x-a")
+    check sp.len == 3 and c.request[sp.start ..< sp.start + sp.len] == "one"
+    check c.headerValue("x-a") == "one"
+    check c.headerValue("x-b") == ""                  # present, empty value
+    check c.headerSpan("x-c").len == 0                # unknown (not in wanted)
+    check c.headerValue("x-c") == ""
+
 when isMainModule:
   echo "All parser tests passed"

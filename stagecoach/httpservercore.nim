@@ -150,6 +150,11 @@ proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
       if c in {'A' .. 'Z'}:
         raise newException(ValueError,
           "Header field not in lower case (case-insensitive matching would never see it): " & field)
+  # 4 framing headers are added to `wanted`; parseHeaders tracks already-seen
+  # names in a 64-bit mask, so keep the total at or under 64.
+  if result.headerfields.len > 60:
+    raise newException(ValueError,
+      "too many requested header fields (limit is 60; framing headers bring the total to 64)")
 
 proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result = HttpContext(server: server, socket: socket, bodystart: -1, keepAlive: true)
@@ -166,7 +171,7 @@ proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result.wantedIdx = WantedIdx(conn: result.wanted.find("connection"),
     te: result.wanted.find("transfer-encoding"), expect: result.wanted.find("expect"),
     cl: result.wanted.find("content-length"))
-  result.queryAt = -1
+  result.queryAt = -2                     # pathSpan scans on first use
   result.headerStart.setLen(result.wanted.len)
   result.headerLen.setLen(result.wanted.len)
   for i in 0 ..< result.wanted.len:
