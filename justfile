@@ -16,6 +16,7 @@ test-integration:
     {{nim}} tests/t_http.nim
     {{nim}} tests/t_modes.nim
     {{nim}} tests/t_limits.nim
+    {{nim}} tests/t_slowlap.nim
     {{nim}} tests/t_shutdown.nim
     {{nim}} tests/t_stop.nim
     {{nim}} tests/t_stream.nim
