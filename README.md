@@ -217,7 +217,7 @@ A badge reads **passing** when the latest run on `main` succeeded for that platf
 - **Installation limitation:** direct and transitive Nimble installations
   cannot currently compile; use the Atlas source-checkout setup above.
 
-### HTTP hardening
+### More HTTP hardening
 
 - Duplicate `Host` headers are rejected by default. `Host` is now tracked for
   identity even when it is not requested via `headerfields`, which lowers the
