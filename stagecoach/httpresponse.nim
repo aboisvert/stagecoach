@@ -1,6 +1,8 @@
 import std/[strutils, posix, os, times]
 import stagelane/core
 import stagelane/transform
+when defined(linux):
+  import stagelane/uring
 import httpservercore
 import socketio
 import httpcore
@@ -47,7 +49,7 @@ proc advertiseKeepAlive(ctx: HttpContext): bool {.inline.} =
 
 const lingerDrainMax = 64 * 1024
 
-proc lingeringClose(ctx: HttpContext, cause: SocketCloseCause, msg: string) =
+proc lingeringClose(ctx: HttpContext, cause: SocketCloseCause, msg: string) {.flow.} =
   ## Closing with unread request bytes makes the kernel send RST, which can
   ## destroy the error response in flight. Half-close, discard what has
   ## already arrived (bounded, never parks), then close.
@@ -216,12 +218,38 @@ when defined(linux):
 
 const fileReadSize = 64 * 1024
 
-proc abortFile(ctx: HttpContext, msg: string): bool =
+proc abortFile(ctx: HttpContext, msg: string): bool {.flow.} =
   ## Headers promised a Content-Length that cannot be met: the framing is
   ## broken, so the connection must not be reused.
   ctx.keepAlive = false
   ctx.closeHttpSocket(NetErrored, msg)
   false
+
+proc streamBufferedFile(ctx: HttpContext, fd: cint, size: int64): bool {.flow.} =
+  var buf = newString(fileReadSize)
+  var left = size
+  while left > 0:
+    let n = min(left, fileReadSize.int64).int
+    var got: int
+    var err: int
+    when defined(linux):
+      if ctx.ringIo:
+        got = ringRead(int(fd), addr buf[0], n)
+        if got < 0: err = -got
+      else:
+        got = posix.read(fd, addr buf[0], n)
+        if got < 0: err = osLastError().int
+    else:
+      got = posix.read(fd, addr buf[0], n)
+      if got < 0: err = osLastError().int
+    if got < 0:
+      if err == EINTR.int: continue
+      return ctx.abortFile("file read error")
+    if got == 0: return ctx.abortFile("file truncated while sending")
+    if ctx.sendSome(addr buf[0], got, lastSendFlags) == Fail:
+      return false
+    left -= got
+  true
 
 proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
   ## Stream a regular file as `200` with `Content-Type` from the extension.
@@ -260,6 +288,8 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
     if noBody:
       return true
     when defined(linux):
+      if ctx.ringIo:
+        return ctx.streamBufferedFile(fd, st.st_size)
       var off: Off = 0
       var left = st.st_size
       while left > 0:
@@ -276,23 +306,12 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
           continue
         return ctx.abortFile(osErrorMsg(OSErrorCode(e)))
     else:
-      var buf = newString(fileReadSize)
-      var left = st.st_size
-      while left > 0:
-        let n = min(left, fileReadSize.int64).int
-        let got = posix.read(fd, addr buf[0], n)
-        if got < 0:
-          if osLastError().int == EINTR.int: continue    # interrupted, the file is unchanged
-          return ctx.abortFile("file read error")
-        if got == 0: return ctx.abortFile("file truncated while sending")
-        if ctx.sendSome(addr buf[0], got, lastSendFlags) == Fail:
-          return false
-        left -= got
+      if not ctx.streamBufferedFile(fd, st.st_size): return false
   finally:
     discard posix.close(fd)
   true
 
 ## Compatibility shim for the pre-0.2 API; no in-repo callers remain. Kept for
 ## downstream code mid-migration; remove with the next major API break.
-proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.deprecated: "use closeHttpSocket".} =
+proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.flow, deprecated: "use closeHttpSocket".} =
   closeHttpSocket(ctx, cause, msg)

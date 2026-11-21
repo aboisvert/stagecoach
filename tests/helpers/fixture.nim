@@ -2,6 +2,7 @@
 
 import std/[net, os, osproc, strutils, tables, times, nativesockets, posix]
 import rawclient
+import buildflags
 export rawclient
 
 type Fixture* = ref object
@@ -21,7 +22,7 @@ proc buildFixture*() =
   if built: return
   let root = getCurrentDir()
   createDir(root / "bin")
-  doAssert execCmd("nim c --hints:off --threads:on -o:" & root / "bin" / "fixture_server " &
+  doAssert execCmd("nim c --hints:off --threads:on" & backendBuildFlag & " -o:" & root / "bin" / "fixture_server " &
     root / "tests" / "fixture_server.nim") == 0, "fixture build failed"
   built = true
 

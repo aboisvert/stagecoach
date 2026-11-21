@@ -23,7 +23,9 @@ what an agent needs beyond it.
   `deps/stagelane/`; carry changes as a patch in `patches/`.
 - Stagelane is pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`;
   `atlas rep` reproduces `atlas.lock`. The upstream persistent readiness API
-  replaces the former PollFd patch.
+  replaces the former PollFd patch. Apply
+  `patches/stagelane-scheduler-cleanup.patch` after dependency setup: it makes
+  worker scheduler cleanup available in non-`flowThreads` builds.
 
 ## Architecture
 
@@ -84,6 +86,9 @@ Internal modules an agent will usually touch:
   No locks, logging, or allocation.
 - On Linux, wait on an upstream watched descriptor only after the syscall
   reports would-block; call `forgetFd` before closing it.
+- Ring-mode sockets are blocking: use ring operations for connection I/O and
+  never call blocking `sendfile` on them. Each worker releases its scheduler
+  after all of its tasks finish.
 - Keep the BSD/macOS path working; guard Linux-only constants and syscalls with
   `when defined(linux)`.
 

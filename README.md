@@ -20,10 +20,24 @@ Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/fl
 
 ```sh
 atlas install   # clones stagelane into deps/ and patches nim.cfg
+git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
 ```
 
 Commit `nim.cfg` and `atlas.lock`. The dependency is pinned to a commit; use
-`atlas rep` to reproduce the lockfile.
+`atlas rep` to reproduce the lockfile. Apply the scheduler cleanup patch to a
+fresh checkout; if it is already applied, do not apply it again. The patch
+closes per-worker scheduler resources when threads exit; the upstream revision
+does not expose that cleanup in its normal build.
+
+## I/O backend
+
+Linux workers prefer io_uring (Linux 5.11+) and fall back to readiness with a
+warning if it is unavailable. Compile with `-d:stagecoachIoUring` to require
+io_uring: `serve` fails if any worker cannot enable it. Compile with
+`-d:stagecoachReadiness` to require readiness instead. The flags are mutually
+exclusive; io_uring is Linux-only. macOS and BSD default to readiness.
+Within a flow handler, helper procs that call potentially suspending operations
+such as `reply`, `reject`, or `closeHttpSocket` must also be marked `{.flow.}`.
 
 ## Quick start
 
@@ -48,7 +62,7 @@ wait(server)                         # aliases: join(server, ...)
 
 Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
-Server knobs (set before `serve`): `backlog` (default 4096) is the listen queue depth; `idleTimeoutms` (default 30000, `<= 0` disables) closes a connection that has not started a request; `sockettimeoutms` (default 5000) bounds any single in-progress read/write once bytes have arrived; `requestTimeoutms` (default 30000) bounds total header/body receive time (slowloris); `sendDate` (default off) adds a `Date` header (cached per thread, refreshed once a second); `replyFile` streams a regular file after flushing any held reply; `headerValue` / `pathSpan` / `querySpan` / `queryParam` slice the request buffer without extra copies. On Linux, accepted sockets use stagelane's persistent edge-triggered readiness support. `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets.
+Server knobs (set before `serve`): `backlog` (default 4096) is the listen queue depth; `idleTimeoutms` (default 30000, `<= 0` disables) closes a connection that has not started a request; `sockettimeoutms` (default 5000) bounds any single in-progress read/write once bytes have arrived; `requestTimeoutms` (default 30000) bounds total header/body receive time (slowloris); `sendDate` (default off) adds a `Date` header (cached per thread, refreshed once a second); `replyFile` streams a regular file after flushing any held reply; `headerValue` / `pathSpan` / `querySpan` / `queryParam` slice the request buffer without extra copies. `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets.
 
 Per-server lifecycle: `stop(srv, drainms = 10_000)` stops that one server—
 stops accepting, lets connection tasks finish for `drainms` ms, then
@@ -94,7 +108,19 @@ just linux-bench       # compile querybench + hey (env: REQUESTS, CONCURRENCY)
 just linux-clean       # remove image and cache volumes
 ```
 
-`scripts/linux-test.sh <build|test|shell|bench|clean>` works without `just`. The container is native arm64 on Apple Silicon; set `PLATFORM=linux/amd64` to force emulated x86_64. Benchmarks inside Docker Desktop's VM are for sanity only, not bare-metal numbers. Tests write binaries into `bin/` on the mounted tree (gitignored); `linux-bench` keeps its binary under `/tmp` in the container. Each `linux-test` / `linux-bench` run resets `deps/stagelane` to the CI commit, discarding local dependency edits.
+`scripts/linux-test.sh <build|test|shell|bench|clean>` works without `just`. The container is native arm64 on Apple Silicon; set `PLATFORM=linux/amd64` to force emulated x86_64. Benchmarks inside Docker Desktop's VM are for sanity only, not bare-metal numbers. Tests write binaries into `bin/` on the mounted tree (gitignored); `linux-bench` keeps its binary under `/tmp` in the container. Each `linux-test` / `linux-bench` run resets `deps/stagelane` to the CI commit and applies the scheduler cleanup patch, discarding local dependency edits.
+
+To require each backend in tests:
+
+```sh
+STAGECOACH_TEST_BACKEND=readiness just linux-test
+STAGECOACH_TEST_BACKEND=ring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test
+STAGECOACH_TEST_BACKEND=ring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test stress
+```
+
+The Docker opt-in disables seccomp filtering for the **test container**, because
+Docker's default profile may block io_uring. Do not use it for production
+containers. Omit it if the host already permits the required syscalls.
 
 ## Testing
 
@@ -111,6 +137,8 @@ Suites are discovered from their directory, so adding one needs no build-file
 or doc edit: drop `t_<name>.nim` into `tests/unit/`, `tests/integration/`, or
 `tests/stress/`. `scripts/run-tests.sh` is the single runner behind every
 command above (`all|unit|integration|stress|one <name>|list|check`).
+Set `STAGECOACH_TEST_BACKEND=ring` or `readiness` to compile tests and their
+fixture servers with that backend required; the default is `auto`.
 
 Layers:
 

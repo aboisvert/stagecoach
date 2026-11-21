@@ -4,18 +4,34 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            backend: ring
+          - os: ubuntu-latest
+            backend: readiness
+          - os: macos-latest
+            backend: auto
     runs-on: ${{ matrix.os }}
+    env:
+      STAGECOACH_TEST_BACKEND: ${{ matrix.backend }}
     steps:
       - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: stable
-      - name: Install stagelane
+      - name: Install stagelane and apply scheduler cleanup patch
         run: |
           mkdir -p deps
           git clone https://github.com/ghazalialshafi/stagelane deps/stagelane
           git -C deps/stagelane checkout f5b7cad5babd884baf9b21f8ea11ee9558d02cff
+          git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
       - uses: extractions/setup-just@v2
       - run: just test-unit
       - run: just test-integration
+      - run: just examples
+      - name: Test backend failure and override behavior
+        if: runner.os == 'Linux' && matrix.backend == 'ring'
+        run: |
+          nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachTestRingUnavailable tests/integration/t_backend_startup.nim
+          nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachIoUring -d:stagecoachTestRingFailOne tests/integration/t_backend_startup.nim
+          nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachReadiness -d:stagecoachTestEnableRingInHandler tests/integration/t_backend_startup.nim

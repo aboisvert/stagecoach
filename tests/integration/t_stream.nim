@@ -1,6 +1,7 @@
 import std/[unittest, net, os, osproc, strutils, times]
 import std/nativesockets
 import ../helpers/rawclient
+import ../helpers/buildflags
 
 const testPort = 18093
 
@@ -8,7 +9,7 @@ var serverProc: Process
 
 proc startTestServer() =
   let root = getCurrentDir()
-  doAssert execCmd("nim c --hints:off --threads:on -o:" & root & "/bin/support_stream " &
+  doAssert execCmd("nim c --hints:off --threads:on" & backendBuildFlag & " -o:" & root & "/bin/support_stream " &
     root & "/tests/support_stream.nim") == 0
   serverProc = startProcess(root & "/bin/support_stream", options = {poUsePath, poStderrToStdout})
   for _ in 0 ..< 200:

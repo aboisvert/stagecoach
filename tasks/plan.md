@@ -15,9 +15,15 @@ non-Linux behavior.
 - At the requested revision, upstream provides `watchFd` / `forgetFd` and
   `waitReadable` / `waitWritable`, with persistent Linux epoll readiness.
   This replaces the purpose of `patches/stagelane-pollfd.patch`, although the
-  APIs and latch semantics are different. The patch is **not needed after
-  Stagecoach migrates off `PollFd`**; remove it only after both backend paths
-  and the regression tests pass. See [upstream scheduler](https://github.com/ghazalialshafi/stagelane/blob/f5b7cad5babd884baf9b21f8ea11ee9558d02cff/src/stagelane/sched.nim).
+  APIs and latch semantics are different. The original PollFd patch is no
+  longer needed. See [upstream scheduler](https://github.com/ghazalialshafi/stagelane/blob/f5b7cad5babd884baf9b21f8ea11ee9558d02cff/src/stagelane/sched.nim).
+- A separate scheduler cleanup patch **is needed**: without it, ten threads
+  that enable a ring leak ten descriptors on exit. The patch exposes
+  `releaseSched` for normal builds and closes the watched-fd epoll instance.
+  Verified with repeated ring and watched-fd workers, with and without
+  `-d:flowThreads`. Apply the patch during CI, Docker, and documented Atlas
+  setup. Readiness also leaks worker descriptors without it, so a build without
+  the cleanup marker fails clearly instead of running an unsafe backend.
 - `ringEnable()` is per scheduler thread and opt-in; `stagelane/net.accept`
   uses ring accept only when active. Stagecoach currently calls POSIX `recv`,
   `send`, and `sendfile` directly, so enabling the ring alone is insufficient.
@@ -46,7 +52,7 @@ non-Linux behavior.
   `tests/support_stream.nim` separately; propagate the selected compile-time
   backend to these subprocess builds as well as to the top-level test binaries.
 - Prepare source compatibility against the old patched runtime before moving
-  the pin so every checkpoint remains buildable. No edits to `deps/stagelane`;
+  the pin so every checkpoint remains buildable. Do not manually edit `deps/stagelane`;
   never use the current Linux script on a checkout with uncommitted dependency
   work, because it force-resets that checkout.
 
@@ -56,13 +62,14 @@ See [`todo.md`](todo.md) for acceptance criteria, commands, and checkpoints.
 
 1. Replace first-party PollFd ownership with readiness API compatibility.
 2. Replace patch-specific tests with behavior-level readiness regressions.
-3. Pin the new upstream revision and retire patch application.
+3. Pin the new upstream revision, retire the PollFd patch, and carry the
+   independently required scheduler cleanup patch.
 4. Add and test Linux completion-based socket operations.
 5. Make file responses safe for ring-mode sockets.
 6. Enable io_uring per Linux worker and verify complete server behavior.
 7. Document dependency, backend selection, and Linux verification.
 
-Tasks 1–3 establish an unpatched, working baseline. Tasks 4–5 prepare the ring
+Tasks 1–3 establish a working readiness baseline. Tasks 4–5 prepare the ring
 path without making it the default; task 6 performs the cutover. Shared source
 files and the pin make these tasks sequential; docs may be drafted in parallel
 after the interfaces settle. Review with the user at checkpoints.

@@ -1,6 +1,6 @@
 ## Shared HTTP server types and constants (no request/response I/O).
 
-import std/[strtabs, logging, atomics, monotimes]
+import std/[strtabs, logging, atomics, monotimes, locks]
 import stagelane/net
 import coachserver
 export coachserver
@@ -63,6 +63,11 @@ type
     sharedListener*: TcpListener
     stopping*: Atomic[bool]             ## this runtime's stop() was requested
     drainms*: int                       ## stop(): force-cancel connections after this window
+    startupLock*: Lock
+    startupCond*: Cond
+    startupReady*: int
+    startupFailed*: bool
+    startupReleased*: bool
 
   HttpContext* = ref object of RootObj
     ## One accepted connection's state. Reused across pipelined requests on
@@ -114,6 +119,8 @@ type
     headOnly*: bool        ## HEAD: Content-Length is the representation size; omit body bytes
     holdWrites*: bool      ## reply appends to sendBuf; the session flushes (connectionLoop)
     idleExpired*: bool     ## idle timer shut the socket down (close as TimedOut, not client EOF)
+    when defined(linux):
+      ringIo*: bool        ## accepted in ring mode, so the socket is blocking
 
 const
   # platform numerals: macOS (BSD)'s MSG_DONTWAIT is 0x80, Linux' is 0x40;

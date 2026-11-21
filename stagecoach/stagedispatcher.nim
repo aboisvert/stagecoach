@@ -10,16 +10,22 @@
 ## stop() pokes the pipes; acceptLoop exits; workerMain lets connection tasks
 ## finish naturally for `drainms` and force-cancels whatever is left.
 
-import std/[posix, os, nativesockets, osproc, logging, atomics, times, strformat]
+import std/[posix, os, nativesockets, osproc, logging, atomics, times, strformat, locks]
 import stagelane/core
 import stagelane/sched
 import stagelane/net
 import stagelane/sync
 import stagelane/transform
 import std/httpcore
-import httpservercore, httprequest, httpresponse, socketio
+import httpservercore, httprequest, httpresponse, socketio, iobackend
 from coachserver import shutdownCallbacks, isShuttingDown, log
 export httpservercore
+
+when defined(stagecoachRingTest):
+  var ringTestWorkerCount* {.global.}: Atomic[int]
+
+when not declared(stagecoachSchedCleanup):
+  {.error: "Stagecoach requires patches/stagelane-scheduler-cleanup.patch".}
 
 when defined(linux):
   # numbers straight from the Linux headers (<asm-generic/socket.h>: SO_REUSEPORT,
@@ -76,6 +82,28 @@ proc makeListener(port, backlog: int, nodelay: bool): TcpListener =
     return TcpListener(fd: fd)
   else:
     listenTcp(port, "0.0.0.0", bl)
+
+when defined(linux):
+  proc acceptReadiness(listener: TcpListener): TcpStream {.flow.} =
+    ## Keep readiness selected even if application code enables a ring later.
+    while true:
+      var sa: Sockaddr_in
+      var len = SockLen(sizeof(sa))
+      let fd = posix.accept(listener.fd, cast[ptr SockAddr](addr sa), addr len)
+      if fd != osInvalidSocket:
+        try:
+          fd.setBlocking(false)
+          watchFd(int(fd))
+        except CatchableError:
+          discard posix.close(fd)
+          raise
+        return TcpStream(fd: fd)
+      let err = osLastError()
+      if err.int == EINTR.int: continue
+      if err.int in [EAGAIN.int, EWOULDBLOCK.int]:
+        waitReadable(int(listener.fd))
+      else:
+        raiseOSError(err)
 
 proc setNoDelay(fd: SocketHandle) =
   ## Disable Nagle so chunked/small replies are not held back on platforms
@@ -149,10 +177,11 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
     # Nothing was registered yet: free what this failed attempt created.
     closeRuntimeFds(result)
     raise
+  initLock(result.startupLock)
+  initCond(result.startupCond)
   httpRuntimes.add result
   srv.runtime = result
   srv.started = true
-  srv.log(lvlInfo, "listening on port " & $port & " with " & $nThreads & " OS threads")
 
 proc newWorker*(rt: HttpRuntime, nThreads: int): Worker =
   let s = rt.httpServer
@@ -230,6 +259,8 @@ proc teardownRuntime(srv: HttpServer) =
   if rt.isNil:
     return
   closeRuntimeFds(rt)
+  deinitCond(rt.startupCond)
+  deinitLock(rt.startupLock)
   for i, cand in httpRuntimes:
     if cand == rt:
       httpRuntimes.delete(i)
@@ -244,13 +275,44 @@ proc joinRuntime*(srv: HttpServer) =
       joinThread(rt.threads[i])
     teardownRuntime(srv)
 
+proc reportWorkerStartup(rt: HttpRuntime, failed: bool): bool =
+  acquire(rt.startupLock)
+  if failed: rt.startupFailed = true
+  inc rt.startupReady
+  broadcast(rt.startupCond)
+  while not rt.startupReleased:
+    wait(rt.startupCond, rt.startupLock)
+  result = not rt.startupFailed
+  release(rt.startupLock)
+
+proc releaseWorkers(rt: HttpRuntime, expected: int): bool =
+  acquire(rt.startupLock)
+  while rt.startupReady < expected:
+    wait(rt.startupCond, rt.startupLock)
+  result = not rt.startupFailed
+  rt.startupReleased = true
+  broadcast(rt.startupCond)
+  release(rt.startupLock)
+
+proc abortWorkerStartup(srv: HttpServer, created: int) =
+  let rt = srv.runtime
+  acquire(rt.startupLock)
+  rt.startupFailed = true
+  rt.startupReleased = true
+  broadcast(rt.startupCond)
+  release(rt.startupLock)
+  for i in 0 ..< created:
+    joinThread(rt.threads[i])
+  rt.threads.setLen(0)
+  teardownRuntime(srv)
+
 template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =
   block:
     let nThreads = if osThreads > 0: osThreads else: max(1, countProcessors())
     let rt = setupRuntime(httpSrv, bindPort, nThreads, connLimit, inflightLimit)
 
-    proc connectionLoop(clientFd: SocketHandle, w: Worker) {.flow.} =
+    proc connectionLoop(clientFd: SocketHandle, w: Worker, useRing: bool) {.flow.} =
       var ctx: HttpContext
       # Reuse: a pooled context keeps its buffers/wanted list for this server;
       # beginRequest runs prepareHttpContext per request anyway.
@@ -259,6 +321,10 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         ctx.socket = clientFd
       else:
         ctx = httpSrv.newHttpContext(clientFd)
+      when defined(linux):
+        # The accepted socket's mode is fixed at accept time. A handler can
+        # enable a ring later, but that must not change this connection's I/O.
+        ctx.ringIo = useRing
       # holdWrites keeps a reply in the reusable sendBuf until the handler
       # returns, so reject/chunked paths can flush held bytes in order. The
       # session loop flushes once per request afterwards (see below).
@@ -313,14 +379,18 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           ctx.carryStart = 0
           w.pool.ctxs.add ctx
 
-    proc acceptLoop(rt: HttpRuntime, workerIdx: int, w: Worker, conns: Scope) {.flow.} =
+    proc acceptLoop(rt: HttpRuntime, workerIdx: int, w: Worker, conns: Scope, useRing: bool) {.flow.} =
       let s = rt.httpServer
       let listener = rt.listenerFor(workerIdx)
       while not isShuttingDown() and not serverIsStopping(s):
         acquire(w.connSem)
         var stream: TcpStream
         try:
-          stream = listener.accept()
+          when defined(linux):
+            if useRing: stream = listener.accept()
+            else: stream = acceptReadiness(listener)
+          else:
+            stream = listener.accept()
         except CancelledError:
           release(w.connSem)
           raise
@@ -329,11 +399,11 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           s.log(lvlError, "accept: " & e.msg)
           delay(50)             # e.g. EMFILE: don't spin
           continue
-        discard conns.go connectionLoop(stream.fd, w)
+        discard conns.go connectionLoop(stream.fd, w, useRing)
 
-    proc workerMain(rt: HttpRuntime, workerIdx: int, w: Worker) {.flow.} =
+    proc workerMain(rt: HttpRuntime, workerIdx: int, w: Worker, useRing: bool) {.flow.} =
       let conns = newScope()    # explicit: survives acceptLoop's cancellation
-      let acceptTask = go acceptLoop(rt, workerIdx, w, conns)
+      let acceptTask = go acceptLoop(rt, workerIdx, w, conns, useRing)
       let watcherTask = go acceptWatcher(rt.shutdownPipes[workerIdx][1], acceptTask)
       waitDone(acceptTask)
       # Graceful path: stop() or a process signal cancelled the accept loop.
@@ -352,12 +422,47 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
 
     proc workerThreadMain(w: WorkerIdx) {.thread.} =
       {.cast(gcsafe).}:
-        let worker = newWorker(w.runtime, w.nThreads)
-        run workerMain(w.runtime, w.idx, worker)
+        try:
+          var backendOk = true
+          var workerRing = false
+          when defined(linux):
+            when ioBackendPolicy != requireReadiness:
+              var active = false
+              when declared(stagecoachSchedCleanup):
+                when defined(stagecoachTestRingUnavailable):
+                  discard
+                elif defined(stagecoachTestRingFailOne):
+                  if w.idx != 1: active = ringEnable()
+                else:
+                  active = ringEnable()
+              when defined(stagecoachRingTest):
+                if active: discard ringTestWorkerCount.fetchAdd(1, moRelaxed)
+              workerRing = active
+              if not active:
+                when ioBackendPolicy == requireIoUring:
+                  backendOk = false
+                else:
+                  w.runtime.httpServer.log(lvlWarn, "io_uring unavailable; using readiness I/O")
+          if reportWorkerStartup(w.runtime, not backendOk):
+            let worker = newWorker(w.runtime, w.nThreads)
+            run workerMain(w.runtime, w.idx, worker, workerRing)
+        finally:
+          when declared(stagecoachSchedCleanup):
+            releaseSched()
 
     rt.threads.setLen(nThreads)
-    for i in 0 ..< nThreads:
-      createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i, nThreads: nThreads))
+    var created = 0
+    try:
+      for i in 0 ..< nThreads:
+        createThread(rt.threads[i], workerThreadMain, WorkerIdx(runtime: rt, idx: i, nThreads: nThreads))
+        inc created
+    except CatchableError:
+      abortWorkerStartup(httpSrv, created)
+      raise
+    if not releaseWorkers(rt, nThreads):
+      abortWorkerStartup(httpSrv, created)
+      raise newException(IOError, "requested io_uring backend is unavailable")
+    httpSrv.log(lvlInfo, "listening on port " & $bindPort & " with " & $nThreads & " OS threads")
 
 template start*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads: int = 0,
                 connLimit: int = defaultConnLimit, inflightLimit: int = defaultInflightLimit) =

@@ -36,7 +36,7 @@ proc isTchar(c: char): bool {.inline.} =
   c in {'!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~'} or
       c in {'0' .. '9'} or c.isAlphaAscii()
 
-proc parseMethod*(ctx: HttpContext): bool =
+proc parseMethod*(ctx: HttpContext): bool {.flow.} =
   # 13 == "X / HTTP/1.0\c": the shortest byte run that can possibly contain a
   # full request line up to its CR, so anything shorter is 400 without a scan.
   if unlikely(ctx.requestlen < 13):
@@ -55,7 +55,7 @@ proc parseMethod*(ctx: HttpContext): bool =
       return false
   true
 
-proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
+proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   if not ctx.parseMethod():
     return false
   var i = ctx.methlen + 1
@@ -164,7 +164,7 @@ proc headerSpan*(ctx: HttpContext, name: string): HttpSpan =
   if wi < 0: return HttpSpan()
   HttpSpan(start: ctx.headerStart[wi].int64, len: ctx.headerLen[wi].int64)
 
-proc parseHeaders*(ctx: HttpContext): bool =
+proc parseHeaders*(ctx: HttpContext): bool {.flow.} =
   ## Line-based scan that stores only the header names in `ctx.wanted`.
   ## The first occurrence of a wanted header wins. Requires `ctx.bodystart`
   ## to be set (header block complete).
@@ -237,7 +237,7 @@ proc requestLineIsHttp10(ctx: HttpContext): bool =
     inc e
   e >= 8 and ctx.request[e - 8 ..< e] == "HTTP/1.0"
 
-proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
+proc processHeaders*(ctx: HttpContext, server: HttpServer): bool {.flow.} =
   ## Validates framing headers (Content-Length, Transfer-Encoding) and decides
   ## keep-alive. Closes the socket and returns false on a protocol violation.
   ctx.headOnly = ctx.requestlen >= 5 and ctx.request.bytesEq(0, "HEAD ", ctx.requestlen)

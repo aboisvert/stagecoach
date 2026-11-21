@@ -1,0 +1,6 @@
+# Opt-in for test hosts whose Docker default seccomp profile blocks io_uring.
+# This disables seccomp filtering for the test container; do not use in production.
+services:
+  linux:
+    security_opt:
+      - seccomp=unconfined

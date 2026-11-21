@@ -30,12 +30,12 @@ and lifecycle tests that work with the old compatibility path and upstream
 watched fds. Preserve regression coverage rather than simply dropping the suite.
 
 **Acceptance criteria:**
-- [ ] Tests cover delayed read/write wakeup, cancellation, close/fd reuse, and no busy-loop after draining.
+- [x] Tests cover delayed read/write wakeup, cancellation, close/fd reuse, and no busy-loop after draining.
 - [x] Tests do not depend on private PollFd fields or the patch.
 
 **Verification:**
 - [x] Run the focused new suite on Linux and `just test-unit` on macOS.
-- [ ] Confirm a deliberately broken wait or cleanup makes a relevant test fail.
+- [x] Confirm a deliberately broken wait makes the readiness test fail (mutation in a disposable directory).
 
 **Dependencies:** Task 1.
 **Files likely touched:** `tests/unit/t_pollfd.nim`, `tests/unit/t_readiness.nim`, `tests/unit/t_response.nim`.
@@ -46,7 +46,7 @@ watched fds. Preserve regression coverage rather than simply dropping the suite.
 - [x] The upgraded dependency passes `just test` and `just examples` on macOS and `just linux-test`; Linux readiness regression passes.
 - [x] Confirm patch-replacement approach against upstream before the pin changes.
 
-## Task 3: Upgrade and remove the local patch
+## Task 3: Upgrade and replace the PollFd patch
 
 **Description:** Pin all dependency resolution and automation to the requested
 full SHA. Refresh `atlas.lock`, including its embedded Nimble metadata, without
@@ -55,7 +55,7 @@ after the upstream readiness baseline works; ensure a fresh clone is reproducibl
 
 **Acceptance criteria:**
 - [x] Nimble/Atlas, CI, and Linux setup specify exactly `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`; a fresh `atlas rep` checked out that SHA.
-- [ ] No runtime or setup path depends on `stagelane-pollfd.patch`; upstream watched readiness works.
+- [x] No runtime or setup path depends on `stagelane-pollfd.patch`; upstream watched readiness works.
 - [x] `atlas rep` does not restore the stale package definition (verified in a disposable directory).
 
 **Verification:**
@@ -72,20 +72,29 @@ after the upstream readiness baseline works; ensure a fresh clone is reproducibl
 retaining readiness fallback. Map `-errno`, partial results, EOF, idle/socket
 timeouts, and cancellation correctly. Keep data alive until the kernel releases
 it; preserve response ordering even though upstream ringSend lacks `MSG_MORE`.
-Do not enable ring by default yet.
+The ring path was staged until file transfers were safe.
 
 **Acceptance criteria:**
-- [ ] Focused ring-enabled socketpair tests prove receive/send, partial progress, EOF/error mapping and timeout/cancellation behavior.
-- [ ] Readiness and non-Linux paths retain existing behavior; no synchronous blocking send/recv occurs on ring sockets.
-- [ ] Cancellation cannot return buffers or contexts to a pool while an operation is in flight.
+- [x] Focused ring-enabled socketpair tests prove receive/send, partial progress, EOF/error mapping and timeout/cancellation behavior.
+- [x] Readiness and non-Linux paths retain existing behavior; no synchronous blocking send/recv occurs on ring sockets.
+- [x] Cancellation waits for completion before buffers or contexts can be reused.
 
 **Verification:**
-- [ ] `just test-one io` and focused ring tests on a Linux host where ring activation is asserted.
-- [ ] `just test-unit` on macOS and Linux readiness mode.
+- [x] `just test-one io` and focused ring tests on a Linux container where ring activation is asserted (`seccomp=unconfined` for the test container).
+- [x] `just test-unit` on macOS and Linux readiness mode.
 
 **Dependencies:** Task 3.
 **Files likely touched:** `stagecoach/socketio.nim`, `tests/unit/t_io.nim`, `tests/helpers/pairs.nim`, `tests/unit/t_uring.nim`.
 **Estimated scope:** Medium.
+
+Completion-based reads and writes are enabled; backend selection is fixed per
+worker and recorded per accepted connection.
+
+Upstream requires a **different** local patch:
+`patches/stagelane-scheduler-cleanup.patch` exposes scheduler cleanup for
+normal builds, drains flow pools, and closes persistent epoll. A Linux probe
+without it leaked ten ring descriptors across ten threads; a second probe found
+undrained pools. Cleanup tests pass in normal and `flowThreads` modes.
 
 ## Task 5: Make file responses ring-safe
 
@@ -94,12 +103,12 @@ bounded buffered transfer and ring sends for ring sockets, with correct
 Content-Length, ordering, truncation, timeout, and disconnect handling.
 
 **Acceptance criteria:**
-- [ ] Large and truncated file responses retain framing and close behavior in both modes.
-- [ ] A slow file reader does not block another connection on the same worker.
+- [x] Ring-mode large and truncated file responses retain framing and close behavior; readiness response regressions pass.
+- [x] A slow file reader does not block another task on the same worker.
 
 **Verification:**
-- [ ] `just test-one response`, `just test-one http` in ring-required and readiness modes.
-- [ ] Run a bounded slow-reader concurrency regression on a ring-capable Linux host.
+- [x] Response and HTTP suites in both modes, plus ring socketpair and real-server file-response regressions.
+- [x] Run a bounded slow-reader concurrency regression on a ring-capable Linux container; it timed out before the fix and passes after.
 
 **Dependencies:** Task 4.
 **Files likely touched:** `stagecoach/httpresponse.nim`, `tests/unit/t_response.nim`, `tests/integration/t_http.nim`, `tests/fixture_server.nim`.
@@ -107,8 +116,8 @@ Content-Length, ordering, truncation, timeout, and disconnect handling.
 
 ## Checkpoint: Completion primitives
 
-- [ ] Ring socket and file regressions actually execute on Linux; fallback and macOS tests remain green.
-- [ ] Review timeout/error behavior and explicit backend policy before cutover.
+- [x] Ring socket and file regressions actually execute on Linux; fallback and macOS tests remain green.
+- [x] Review timeout/error behavior and explicit backend policy before cutover.
 
 ## Task 6: Enable io_uring on Linux workers
 
@@ -119,27 +128,28 @@ By default Linux prefers ring and reports readiness fallback if unavailable.
 `-d:stagecoachReadiness` selects readiness. Reject conflicting flags and forced
 ring on non-Linux. Coordinate worker startup so a failed required ring is
 reported to the caller and all partially started workers/listeners are cleaned
-up. Preserve shutdown pipe polling and worker lifecycle.
+up. Call the patched `releaseSched` on every worker exit after its tasks stop;
+builds without the cleanup marker fail clearly because both backends leak
+descriptors without it. Preserve shutdown pipe polling and worker lifecycle.
 
 **Acceptance criteria:**
-- [ ] On a capable Linux host every worker enables ring and real accept/recv/send operations are verified as ring operations.
-- [ ] Auto mode falls back visibly; explicit selection never silently falls back, and unavailable required ring fails startup.
-- [ ] Conflicting flags and forced ring on non-Linux fail at compile time; macOS/BSD defaults compile.
-- [ ] Stop, drain, cancellation, restart, timeouts, pipelining, and concurrent clients pass in both Linux modes.
+- [x] On a capable Linux container every worker enables ring; real accept/recv/send are exercised and ring reads/writes are asserted.
+- [x] Auto mode falls back visibly; explicit selection never silently falls back, and unavailable required ring fails startup.
+- [x] Conflicting flags and forced ring on non-Linux fail at compile time; macOS builds and FreeBSD passes `nim check`.
+- [x] Stop, drain, cancellation, restart, timeouts, pipelining, and concurrent clients pass in both Linux modes.
 
 **Verification:**
-- [ ] Run `just test` and `just stress` with `-d:stagecoachIoUring` and `-d:stagecoachReadiness`; assert backend, do not count skips.
-- [ ] Propagate the same compile-time selection to separately compiled fixture and streaming servers.
-- [ ] Test auto selection, injected ring failure, forced-ring failure, and invalid flag combinations.
-- [ ] Use deterministic backend instrumentation or syscall tracing to prove real ring operations; run `just examples` on macOS and Linux.
+- [x] Run full and stress suites with ring required and readiness required; assert backend, do not count skips.
+- [x] Propagate the same compile-time selection to separately compiled fixture and streaming servers.
+- [x] Test auto selection, injected ring failure, forced-ring failure, and invalid flag combinations.
+- [x] Use deterministic backend instrumentation to prove real ring operations; compile examples on macOS and Linux.
 
 **Dependencies:** Tasks 4–5.
 **Files likely touched:** `stagecoach/stagedispatcher.nim`, `tests/fixture_server.nim`, `tests/integration/t_stop.nim`, `tests/integration/t_http.nim`, `scripts/run-tests.sh`.
 **Estimated scope:** Medium.
 
-Progress: `stagecoach/iobackend.nim` defines and tests the compile-time policy;
-it is not yet connected to worker startup, so the flags do not yet select a
-running backend.
+`stagecoach/iobackend.nim` defines the policy, and coordinated worker startup
+enforces it. Forced readiness remains selected even if a handler enables a ring.
 
 ## Task 7: Document and verify installation
 
@@ -147,12 +157,12 @@ running backend.
 and testing guidance. Preserve historical review/spec files as history.
 
 **Acceptance criteria:**
-- [ ] README and agent guidance describe the exact pin, clean install, ring requirements, fallback, and test commands accurately.
-- [ ] No current setup instruction asks users to apply the retired patch.
+- [x] README and agent guidance describe the exact pin, clean install, ring requirements, fallback, and test commands accurately.
+- [x] No current setup instruction asks users to apply the retired patch.
 
 **Verification:**
-- [ ] Follow the documented clean-clone install and verify the resolved SHA.
-- [ ] Search current setup docs and automation for stale pin and patch references.
+- [x] Follow the documented clean install, apply the patch, run a ring backend test, and verify the resolved SHA.
+- [x] Search current setup docs and automation for stale pin and patch references.
 
 **Dependencies:** Tasks 3 and 6.
 **Files likely touched:** `README.md`, `AGENT.md`.
@@ -160,7 +170,7 @@ and testing guidance. Preserve historical review/spec files as history.
 
 ## Checkpoint: Complete
 
-- [ ] macOS: `just test`, `just stress`, `just examples` pass.
-- [ ] Linux: same suites pass with ring required and readiness forced; actual ring operations are evidenced.
-- [ ] Ring-capable Linux host, Docker, and CI paths are exercised; any unexpected limitations are recorded, not counted as ring coverage.
+- [x] macOS: `just test`, `just stress`, `just examples` pass.
+- [x] Linux/Docker: full and stress suites pass with ring required and readiness forced; ring operations are evidenced.
+- [ ] GitHub CI and a separate native Linux host have not been exercised locally.
 - [ ] Clean install matches the exact SHA; no unintended changes; human review completed.

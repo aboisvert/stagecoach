@@ -11,11 +11,14 @@ import std/[os, posix]
 import stagelane/core
 import stagelane/sched
 import stagelane/transform
+when defined(linux):
+  import stagelane/uring
 import httpservercore
 from coachserver import SocketCloseCause, isShuttingDown
 const flushSendFlags = httpservercore.MSG_NOSIGNAL or MSG_DONTWAIT
 
-proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "")
+when defined(linux) and defined(stagecoachRingTest):
+  var ringTestReads*, ringTestWrites* {.threadvar.}: int
 
 proc classifyRecv*(ret: int, cause: var SocketCloseCause, msg: var string): SocketState =
   ## Pure classification of a `recv` result; the caller decides whether to close.
@@ -40,18 +43,18 @@ proc classifyRecv*(ret: int, cause: var SocketCloseCause, msg: var string): Sock
   msg = osErrorMsg(OSErrorCode(lastError))
   Fail
 
-proc checkRecv*(ctx: HttpContext, ret: int): SocketState =
-  ## `classifyRecv`, closing the socket on failure.
-  # A zero-byte read after the idle timer shut the socket down (see
-  # waitSocketReadable) is the idle timeout, not a normal peer close.
-  if ret == 0 and ctx.idleExpired:
-    closeHttpSocket(ctx, TimedOut, "idle")
-    return Fail
-  var cause = CloseCalled
-  var msg = ""
-  result = classifyRecv(ret, cause, msg)
-  if result == Fail:
-    closeHttpSocket(ctx, cause, msg)
+proc closeImmediately(ctx: HttpContext, cause: SocketCloseCause, msg: string) =
+  let fd = ctx.socket
+  if fd == INVALID_SOCKET:
+    return
+  ctx.sendBuf.setLen(0)
+  ctx.requestlen = 0
+  ctx.carryLen = 0
+  ctx.carryStart = 0
+  ctx.socket = INVALID_SOCKET
+  when declared(forgetFd):
+    forgetFd(int(fd))
+  closeSocket(ctx.server, fd, cause, msg)
 
 template withSocketTimeout(ctx: HttpContext, waitCall: untyped) =
   ## Bound one parked wait by `sockettimeoutms`: a lazily-armed timer cancels
@@ -75,7 +78,7 @@ template parkRead(ctx: HttpContext) =
 template parkWrite(ctx: HttpContext) =
   waitWritable(int(ctx.socket))
 
-proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
+template withReadTimeout(ctx: HttpContext, waitCall: untyped) =
   let idleWait = ctx.requestlen == 0 and not ctx.bodyClockSet
   if idleWait and ctx.server.idleTimeoutms > 0:
     let ms = ctx.server.idleTimeoutms
@@ -85,11 +88,14 @@ proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
         if ctx.socket != INVALID_SOCKET:
           discard shutdown(ctx.socket, SHUT_RDWR))
     try:
-      ctx.parkRead()
+      waitCall
     finally:
       cancel(timer)
   else:
-    ctx.withSocketTimeout(ctx.parkRead())
+    ctx.withSocketTimeout(waitCall)
+
+proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
+  ctx.withReadTimeout(ctx.parkRead())
 
 proc waitSocketWritable*(ctx: HttpContext) {.flow.} =
   ctx.withSocketTimeout(ctx.parkWrite())
@@ -99,18 +105,31 @@ proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): Socke
   ## Closes the socket and returns Fail on error.
   var sent = 0
   while sent < length:
-    let ret = send(ctx.socket, cast[pointer](cast[int](data) + sent), (length - sent).cint, flags)
+    let buf = cast[pointer](cast[int](data) + sent)
+    var ret: int
+    var e: OSErrorCode
+    when defined(linux):
+      if ctx.ringIo:
+        when defined(stagecoachRingTest): inc ringTestWrites
+        ctx.withSocketTimeout:
+          ret = ringSend(int(ctx.socket), buf, length - sent)
+        if ret < 0: e = OSErrorCode(-ret)
+      else:
+        ret = send(ctx.socket, buf, (length - sent).cint, flags)
+        if ret < 0: e = osLastError()
+    else:
+      ret = send(ctx.socket, buf, (length - sent).cint, flags)
+      if ret < 0: e = osLastError()
     if ret > 0:
       sent += ret
       continue
     if ret < 0:
-      let e = osLastError()
       if e.int == EINTR.int:
         continue
       if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
         ctx.waitSocketWritable()
         continue
-      closeHttpSocket(ctx, NetErrored, osErrorMsg(e))
+      closeImmediately(ctx, NetErrored, osErrorMsg(e))
       return Fail
     ctx.waitSocketWritable()   # send() returned 0: treat as would-block
   Complete
@@ -136,6 +155,21 @@ proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
   if ctx.holdWrites and ctx.sendBuf.len > 0:
     if ctx.flushSendBuf() == Fail:
       return -1
+  when defined(linux):
+    if ctx.ringIo:
+      while true:
+        var r: int
+        when defined(stagecoachRingTest): inc ringTestReads
+        ctx.withReadTimeout:
+          r = ringRecv(int(ctx.socket), buf, n)
+        if r == -EINTR.int: continue
+        if r == -EAGAIN.int or r == -EWOULDBLOCK.int:
+          ctx.waitSocketReadable()
+          continue
+        if r < 0:
+          posix.errno = (-r).cint
+          return -1
+        return r
   while true:
     let r = recv(ctx.socket, buf, n.cint, MSG_DONTWAIT)
     if r >= 0:
@@ -148,7 +182,7 @@ proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
     else:
       return r
 
-proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
+proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.flow.} =
   let fd = ctx.socket
   if fd == INVALID_SOCKET:
     return
@@ -163,12 +197,18 @@ proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
       # A failed flush closes the socket re-entrantly; do not close it twice.
       if ctx.socket != fd:
         return
-    ctx.sendBuf.setLen(0)
   # Pipelined bytes must not be parsed after the handler closed the connection.
-  ctx.requestlen = 0
-  ctx.carryLen = 0
-  ctx.carryStart = 0
-  ctx.socket = INVALID_SOCKET
-  when declared(forgetFd):
-    forgetFd(int(fd))
-  closeSocket(ctx.server, fd, cause, msg)
+  ctx.closeImmediately(cause, msg)
+
+proc checkRecv*(ctx: HttpContext, ret: int): SocketState {.flow.} =
+  ## `classifyRecv`, closing the socket on failure.
+  # A zero-byte read after the idle timer shut the socket down (see
+  # waitSocketReadable) is the idle timeout, not a normal peer close.
+  if ret == 0 and ctx.idleExpired:
+    closeHttpSocket(ctx, TimedOut, "idle")
+    return Fail
+  var cause = CloseCalled
+  var msg = ""
+  result = classifyRecv(ret, cause, msg)
+  if result == Fail:
+    closeHttpSocket(ctx, cause, msg)
