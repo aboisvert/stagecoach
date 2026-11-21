@@ -88,8 +88,13 @@ proc pokeAllShutdownPipes() {.nimcall, raises: [].} =
     # Runs on the SIGINT/SIGTERM path (coachserver.shutdown -> shutdownCallbacks):
     # keep it async-signal-safe - only write(2), no locks, logging or allocation.
     # The bytes are consumed by the acceptWatcher task under normal stop().
-    for rt in httpRuntimes:
-      for (wfd, _) in rt.shutdownPipes:
+    # seq assignment copies the (ptr, len) descriptor without allocating, so a
+    # signal landing during setup/teardown walks a stable snapshot instead of
+    # following a possibly reallocated global seq.
+    let runtimes = httpRuntimes
+    for rt in runtimes:
+      let pipes = rt.shutdownPipes
+      for (wfd, _) in pipes:
         var b: array[1, char] = ['x']
         discard write(wfd, addr b[0], 1)
 
@@ -118,6 +123,10 @@ proc setupRuntime*(srv: HttpServer, port, nThreads, connLimit, inflightLimit: in
   ## resources are torn down again in `wait`.
   if srv.maxheaderlength > srv.bufferlength:
     raise newException(ValueError, "maxheaderlength must not exceed bufferlength")
+  # srv.port is a uint16 and bindAddr uses Port(port); reject out-of-range
+  # values instead of silently wrapping to a different listening port.
+  if port < 0 or port > 65535:
+    raise newException(ValueError, "port must be in 0..65535 (0 = ephemeral)")
   srv.osThreads = nThreads
   srv.maxConnections = connLimit
   srv.maxInflight = inflightLimit
@@ -250,8 +259,9 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         ctx.socket = clientFd
       else:
         ctx = httpSrv.newHttpContext(clientFd)
-      # a session holds replies in sendBuf so pipelined replies coalesce into
-      # one write when the last one completes (see flushSendBuf/endRequest)
+      # holdWrites keeps a reply in the reusable sendBuf until the handler
+      # returns, so reject/chunked paths can flush held bytes in order. The
+      # session loop flushes once per request afterwards (see below).
       ctx.holdWrites = true
       try:
         # A child must not inherit an accepted connection.
@@ -287,11 +297,10 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           if not ctx.responded:
             ctx.reject(Http500, Excepted, "handler sent no reply")
             break
-          # flush while held bytes are still modest so a run of pipelined
-          # replies never grows sendBuf by megabytes (endRequest flushes too)
-          if ctx.sendBuf.len > 32 * 1024:
-            if ctx.flushSendBuf() == Fail:
-              break
+          # Flush after every handler: a pipelined client must not wait for
+          # later handlers to receive its reply, and this bounds sendBuf
+          # growth. The old 32 KB pre-check was subsumed by this branch
+          # (holdWrites is always true here), so it was removed.
           if ctx.holdWrites and ctx.sendBuf.len > 0:
             if ctx.flushSendBuf() == Fail:
               break

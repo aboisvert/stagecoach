@@ -7,6 +7,8 @@ from std/strutils import replace
 export SocketHandle, INVALID_SOCKET, posix.`==`, Level
 
 const LogColors = ["\e[90m", "\e[36m", "\e[32m", "\e[34m", "\e[33m", "\e[31m", "\e[35m", "\e[35m"]  # indexed by Level: 8 values (lvlAll..lvlNone)
+## Compatibility alias for the pre-stagelane API; no in-repo callers remain.
+## Keep it for downstream code mid-migration; drop it with the next API break.
 template LogLevel*(thelevel: untyped): untyped = Level {.deprecated: "use Level (std/logging) instead of LogLevel".}
 const lvlTRACE* = lvlAll
 
@@ -54,7 +56,11 @@ proc `$`*(x: SocketHandle): string {.inline.} = $(x.cint)
 proc shutdown*() =
   {.gcsafe.}:
     shuttingdown.store(true, moRelease)
-    for shutdownCallback in shutdownCallbacks:
+    # Snapshot the callback list before walking it. Nim seq assignment copies
+    # the (ptr, len) descriptor without allocating, which is safe in signal
+    # context; iterating the global directly could follow a reallocation.
+    let callbacks = shutdownCallbacks
+    for shutdownCallback in callbacks:
       shutdownCallback()
 
 {.hint[XDeclaredButNotUsed]: off.}

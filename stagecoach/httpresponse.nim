@@ -252,8 +252,13 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
   try:
     var head = move ctx.sendBuf
     let ok = ctx.writeToSocket(head, if noBody: lastSendFlags else: moreSendFlags) != Fail
-    head.setLen(0)
-    if head.len < 65536: ctx.sendBuf = head
+    # Check the length BEFORE clearing it (as flushSendBuf does): checking
+    # after setLen(0) would keep every buffer and defeat the size bound.
+    if ok and head.len < 65536:
+      ctx.sendBuf = head
+      ctx.sendBuf.setLen(0)
+    else:
+      head.setLen(0)
     if not ok: return false
     if noBody:
       return true
@@ -291,5 +296,7 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
     discard posix.close(fd)
   true
 
+## Compatibility shim for the pre-0.2 API; no in-repo callers remain. Kept for
+## downstream code mid-migration; remove with the next major API break.
 proc closeSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") {.deprecated: "use closeHttpSocket".} =
   closeHttpSocket(ctx, cause, msg)
