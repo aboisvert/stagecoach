@@ -83,10 +83,11 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 
 ## Running Linux tests on macOS (Docker)
 
-Use a Linux container to run the full test suite (including real PollFd tests on Linux) and query benchmarks from macOS:
+Use a Linux container to run every discovered test suite (including real PollFd tests on Linux) and query benchmarks from macOS:
 
 ```
-just linux-test        # build image, set up deps/stagelane, run `just test` suites
+just linux-test        # build image, set up deps/stagelane, run every discovered suite
+just linux-test unit   # narrow to a layer (unit|integration|stress)
 just linux-shell       # interactive shell with the repo mounted at /work
 just linux-bench       # compile querybench + hey (env: REQUESTS, CONCURRENCY)
 just linux-clean       # remove image and cache volumes
@@ -97,20 +98,36 @@ just linux-clean       # remove image and cache volumes
 ## Testing
 
 ```
-just test              # unit + in-process + integration suites
-just test-unit         # t_core, t_parser, t_io, t_response (no network)
-just test-integration  # t_http, t_modes, t_limits, t_shutdown, t_stop, t_stream
-just test-one http     # a single suite (tests/t_http.nim)
-just stress            # concurrent/soak suite (release build, ~10 s)
+just test              # every discovered suite (unit + integration)
+just test-unit         # tests/unit/ only (no network)
+just test-integration  # tests/integration/ only
+just test-one http     # a single suite from any layer
+just stress            # tests/stress/ (release build, ~10 s)
 nimble test            # same as `just test`
 ```
 
+Suites are discovered from their directory, so adding one needs no build-file
+or doc edit: drop `t_<name>.nim` into `tests/unit/`, `tests/integration/`, or
+`tests/stress/`. `scripts/run-tests.sh` is the single runner behind every
+command above (`all|unit|integration|stress|one <name>|list|check`).
+
 Layers:
 
-- `t_core`, `t_parser`: pure unit tests (defaults, logging, close causes, `recv` classification, request line, headers, framing, pipelining).
-- `t_io`, `t_response`: `beginRequest`/`endRequest` and response framing over a `socketpair`, driven by a scripted peer task.
-- `t_http`, `t_modes`, `t_limits`, `t_shutdown`: spawn `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`).
-- `t_stress`: seeded concurrent pipelined clients with abrupt disconnects, close accounting and an RSS growth check. The seed is printed so a failure can be replayed.
+- `tests/unit/`: no listening socket or subprocess. Defaults, logging, close
+  causes, `recv` classification, request line, headers, framing, and
+  pipelining, plus `beginRequest`/`endRequest` and response framing over a
+  `socketpair`. The Linux PollFd latch suite compiles to an empty body
+  elsewhere and runs in the Docker/Linux path.
+- `tests/integration/`: end-to-end over real sockets. The fixture suites spawn
+  `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at
+  `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`); the
+  self-hosted suites start servers in-process or as subprocesses.
+- `tests/stress/`: seeded concurrent pipelined clients with abrupt disconnects,
+  close accounting and an RSS growth check. The seed is printed so a failure
+  can be replayed.
+
+Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
+`tests/support_stream.nim`) stays at the `tests/` root.
 
 ## Unreleased (hardening follow-up)
 

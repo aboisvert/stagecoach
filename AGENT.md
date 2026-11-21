@@ -106,15 +106,15 @@ Internal modules an agent will usually touch:
 
 See README § Testing for the suites, layers, and commands. Agent-specific:
 
-- Each suite is a standalone `tests/t_<name>.nim` with a `when isMainModule`
-  tail.
-- Register a new suite in both `justfile` and `stagecoach.nimble`; the lists
-  differ (`t_slowlap` is in `just` only). Prefer `just test` over `nimble test`
-  for that reason.
+- Each suite is a standalone `tests/<layer>/t_<name>.nim` (layer: `unit`,
+  `integration`, or `stress`) with a `when isMainModule` tail.
+- Add the file under the right layer directory; `scripts/run-tests.sh`
+  discovers it, and every entry point (`just`, `nimble`, Docker, CI) uses that
+  runner. Never add suite lists to build files or docs.
 - Keep tests deterministic: free ports, bounded `waitFor` polling, no arbitrary
   sleeps. Keep stress-test failures replayable.
 - Callbacks that capture results into module globals use `{.cast(gcsafe).}`
-  around the mutation (see `tests/t_core.nim`). Prefer the server's
+  around the mutation (see `tests/unit/t_core.nim`). Prefer the server's
   observation callbacks over shared global state where possible.
 - Add the regression test with the fix: `t_parser` for framing/parsing,
   `t_http`/`t_io` for wire and connection behavior.
