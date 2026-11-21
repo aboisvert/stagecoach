@@ -11,7 +11,7 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 ## Requirements
 
 - Nim ≥ 2.2.0
-- [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas) (`stagecoach.nimble` pins `#head` for now)
+- [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas), pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`
 - Build with `--threads:on` (Nim default for your config)
 
 Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/flow`](stagecoach/flow.nim) in application code so `{.flow.}` works in your modules.
@@ -22,7 +22,8 @@ Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/fl
 atlas install   # clones stagelane into deps/ and patches nim.cfg
 ```
 
-Commit `nim.cfg` and `atlas.lock`. After a fresh clone, `atlas install` follows `#head`; use `atlas rep` to match the lockfile.
+Commit `nim.cfg` and `atlas.lock`. The dependency is pinned to a commit; use
+`atlas rep` to reproduce the lockfile.
 
 ## Quick start
 
@@ -47,7 +48,7 @@ wait(server)                         # aliases: join(server, ...)
 
 Use `delay`, `waitReadable`, and other stagelane calls inside handlers for async work—no `asyncdispatch` or `replyPending`.
 
-Server knobs (set before `serve`): `backlog` (default 4096) is the listen queue depth; `idleTimeoutms` (default 30000, `<= 0` disables) closes a connection that has not started a request; `sockettimeoutms` (default 5000) bounds any single in-progress read/write once bytes have arrived; `requestTimeoutms` (default 30000) bounds total header/body receive time (slowloris); `sendDate` (default off) adds a `Date` header (cached per thread, refreshed once a second); `replyFile` streams a regular file after flushing any held reply; `headerValue` / `pathSpan` / `querySpan` / `queryParam` slice the request buffer without extra copies. On Linux, accepted sockets use a persistent edge-triggered `PollFd` in the vendored `stagelane` tree (apply `patches/stagelane-pollfd.patch` to `deps/stagelane` after `atlas install`; CI does this). `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets.
+Server knobs (set before `serve`): `backlog` (default 4096) is the listen queue depth; `idleTimeoutms` (default 30000, `<= 0` disables) closes a connection that has not started a request; `sockettimeoutms` (default 5000) bounds any single in-progress read/write once bytes have arrived; `requestTimeoutms` (default 30000) bounds total header/body receive time (slowloris); `sendDate` (default off) adds a `Date` header (cached per thread, refreshed once a second); `replyFile` streams a regular file after flushing any held reply; `headerValue` / `pathSpan` / `querySpan` / `queryParam` slice the request buffer without extra copies. On Linux, accepted sockets use stagelane's persistent edge-triggered readiness support. `nodelay` (default `true`) sets `TCP_NODELAY` on accepted sockets.
 
 Per-server lifecycle: `stop(srv, drainms = 10_000)` stops that one server—
 stops accepting, lets connection tasks finish for `drainms` ms, then
@@ -83,7 +84,7 @@ Query GET benchmark (compiles `examples/querybench.nim` with `-d:release`, runs 
 
 ## Running Linux tests on macOS (Docker)
 
-Use a Linux container to run every discovered test suite (including real PollFd tests on Linux) and query benchmarks from macOS:
+Use a Linux container to run every discovered test suite and query benchmarks from macOS:
 
 ```
 just linux-test        # build image, set up deps/stagelane, run every discovered suite
@@ -93,7 +94,7 @@ just linux-bench       # compile querybench + hey (env: REQUESTS, CONCURRENCY)
 just linux-clean       # remove image and cache volumes
 ```
 
-`scripts/linux-test.sh <build|test|shell|bench|clean>` works without `just`. The container is native arm64 on Apple Silicon; set `PLATFORM=linux/amd64` to force emulated x86_64. Benchmarks inside Docker Desktop's VM are for sanity only, not bare-metal numbers. Tests write binaries into `bin/` on the mounted tree (gitignored); `linux-bench` keeps its binary under `/tmp` in the container. Each `linux-test` / `linux-bench` run resets `deps/stagelane` to the CI commit and reapplies `patches/stagelane-pollfd.patch`.
+`scripts/linux-test.sh <build|test|shell|bench|clean>` works without `just`. The container is native arm64 on Apple Silicon; set `PLATFORM=linux/amd64` to force emulated x86_64. Benchmarks inside Docker Desktop's VM are for sanity only, not bare-metal numbers. Tests write binaries into `bin/` on the mounted tree (gitignored); `linux-bench` keeps its binary under `/tmp` in the container. Each `linux-test` / `linux-bench` run resets `deps/stagelane` to the CI commit, discarding local dependency edits.
 
 ## Testing
 
@@ -116,8 +117,7 @@ Layers:
 - `tests/unit/`: no listening socket or subprocess. Defaults, logging, close
   causes, `recv` classification, request line, headers, framing, and
   pipelining, plus `beginRequest`/`endRequest` and response framing over a
-  `socketpair`. The Linux PollFd latch suite compiles to an empty body
-  elsewhere and runs in the Docker/Linux path.
+  `socketpair`, including readiness and cancellation behavior.
 - `tests/integration/`: end-to-end over real sockets. The fixture suites spawn
   `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at
   `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`); the

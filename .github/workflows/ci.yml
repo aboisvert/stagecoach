@@ -11,12 +11,11 @@ jobs:
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: stable
-      - name: Install stagelane and apply the PollFd patch
+      - name: Install stagelane
         run: |
           mkdir -p deps
           git clone https://github.com/ghazalialshafi/stagelane deps/stagelane
-          git -C deps/stagelane checkout f72f1ea
-          git -C deps/stagelane apply ../../patches/stagelane-pollfd.patch
+          git -C deps/stagelane checkout f5b7cad5babd884baf9b21f8ea11ee9558d02cff
       - uses: extractions/setup-just@v2
       - run: just test-unit
       - run: just test-integration

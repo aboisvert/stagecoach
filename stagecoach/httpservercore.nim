@@ -114,7 +114,6 @@ type
     headOnly*: bool        ## HEAD: Content-Length is the representation size; omit body bytes
     holdWrites*: bool      ## reply appends to sendBuf; the session flushes (connectionLoop)
     idleExpired*: bool     ## idle timer shut the socket down (close as TimedOut, not client EOF)
-    pf*: pointer            ## Linux PollFd when the persistent epoll path is active; else nil
 
 const
   # platform numerals: macOS (BSD)'s MSG_DONTWAIT is 0x80, Linux' is 0x40;

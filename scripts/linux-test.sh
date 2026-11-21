@@ -12,7 +12,7 @@ export HOST_UID="$(id -u)" HOST_GID="$(id -g)"
 # the Dockerfile reuses an existing group.
 [ -n "${PLATFORM:-}" ] || unset PLATFORM
 
-STAGELANE_COMMIT=f72f1ea
+STAGELANE_COMMIT=f5b7cad5babd884baf9b21f8ea11ee9558d02cff
 RUN=(docker compose run --rm --no-TTY)
 [ -t 0 ] && RUN=(docker compose run --rm)
 
@@ -28,7 +28,6 @@ setup_stagelane='
   fi
   git -C deps/stagelane checkout -f '"$STAGELANE_COMMIT"'
   git -C deps/stagelane reset --hard '"$STAGELANE_COMMIT"'
-  git -C deps/stagelane apply ../../patches/stagelane-pollfd.patch
 '
 
 cmd="${1:-test}"; [ $# -gt 0 ] && shift
@@ -37,8 +36,8 @@ case "$cmd" in
   build)
     docker compose build "$@" ;;
   test)
-    # Run the same discovered suites as `just test`; `nimble test` would fetch
-    # an unpatched stagelane. Optional layer: `just linux-test unit`.
+    # Run the same discovered suites as `just test`. Optional layer:
+    # `just linux-test unit`.
     suite="${1:-all}"
     case "$suite" in
       all|unit|integration|stress) ;;

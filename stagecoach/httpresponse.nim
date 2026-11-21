@@ -5,9 +5,6 @@ import httpservercore
 import socketio
 import httpcore
 from coachserver import SocketCloseCause, isShuttingDown
-when defined(linux):
-  from stagelane/sched import PollFd
-
 const lastSendFlags = httpservercore.MSG_NOSIGNAL or MSG_DONTWAIT
 const moreSendFlags = lastSendFlags or MSG_MORE
 
@@ -275,7 +272,6 @@ proc replyFile*(ctx: HttpContext, path: string): bool {.flow.} =
         let e = osLastError().int
         if e == EINTR.int: continue
         if e in [EAGAIN.int, EWOULDBLOCK.int]:
-          if ctx.pf != nil: cast[PollFd](ctx.pf).wrReady = false
           ctx.waitSocketWritable()
           continue
         return ctx.abortFile(osErrorMsg(OSErrorCode(e)))

@@ -7,7 +7,7 @@ skipDirs = @["examples"]
 
 
 requires "nim >= 2.2.0"
-requires "https://github.com/ghazalialshafi/stagelane#head"
+requires "https://github.com/ghazalialshafi/stagelane#f5b7cad5babd884baf9b21f8ea11ee9558d02cff"
 
 proc compileAndRunExample(name: string, flags = "") =
   exec "nim c -r --hints:off --outdir:bin " & flags & " examples/" & name & ".nim"

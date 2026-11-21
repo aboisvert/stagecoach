@@ -21,11 +21,9 @@ what an agent needs beyond it.
 
 - `deps/` is vendored and not committed. Never edit files under
   `deps/stagelane/`; carry changes as a patch in `patches/`.
-- CI pins stagelane to `f72f1ea`. `atlas install` follows `#head`; use
-  `atlas rep` to reproduce `atlas.lock` (see quirks below).
-- The Linux PollFd path needs `patches/stagelane-pollfd.patch`; CI and the
-  Docker recipes apply it automatically (README § Running Linux tests on macOS
-  (Docker)).
+- Stagelane is pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`;
+  `atlas rep` reproduces `atlas.lock`. The upstream persistent readiness API
+  replaces the former PollFd patch.
 
 ## Architecture
 
@@ -84,8 +82,8 @@ Internal modules an agent will usually touch:
   the worker; use `delay`/`pool.go` (with `-d:flowThreads`) instead.
 - `shutdownCallbacks` run in a signal context: only `write(2)` and atomics.
   No locks, logging, or allocation.
-- On Linux, clear the PollFd `rdReady`/`wrReady` latch on `EAGAIN` or a short
-  read/write before parking, or the next wait busy-loops.
+- On Linux, wait on an upstream watched descriptor only after the syscall
+  reports would-block; call `forgetFd` before closing it.
 - Keep the BSD/macOS path working; guard Linux-only constants and syscalls with
   `when defined(linux)`.
 
@@ -140,8 +138,7 @@ See README § Testing for the suites, layers, and commands. Agent-specific:
 - `.gitignore` ignores extensionless files under `tests/` (compiled binaries)
   while keeping `.nim` sources and `tests/helpers/` tracked. Build test
   binaries into `bin/` rather than next to the sources.
-- `atlas rep` also replays the lockfile's embedded copy of `stagecoach.nimble`,
-  which is stale (version 0.1, missing tasks). It overwrites the current file;
-  restore `stagecoach.nimble` afterwards or refresh `atlas.lock`.
+- `atlas rep` also replays the lockfile's embedded copy of `stagecoach.nimble`;
+  keep that metadata in sync when changing the package definition.
 - The Docker workflow resets `deps/stagelane` to the CI commit on every
   `linux-test`/`linux-bench` run; local edits there will be discarded.

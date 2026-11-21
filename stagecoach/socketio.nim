@@ -3,23 +3,16 @@
 ## wrapper. `httprequest` and `httpresponse` drive this module; they keep no
 ## retry logic of their own.
 ##
-## PollFd discipline (Linux): the persistent edge-triggered PollFd latches
-## read/write readiness between syscalls. The event handler sets a bit and
-## wakes any parked waiter; the I/O code HERE must clear the bit when the
-## socket drained (EAGAIN, or a short read/write - either proves the stream
-## is empty/full for now) BEFORE the next pioWaitRead/pioWaitWrite, else
-## that wait returns at once and the caller busy-loops. `pioOpen` starts
-## with both bits set: try the syscall first, park only on EAGAIN.
+## Readiness waits follow a would-block result. Newer stagelane versions
+## register accepted sockets for persistent readiness and consume their own
+## readiness latches when the wait is made.
 
 import std/[os, posix]
 import stagelane/core
 import stagelane/sched
 import stagelane/transform
 import httpservercore
-from coachserver import SocketCloseCause, isShuttingDown, logClose
-when defined(linux):
-  from stagelane/sched import PollFd, pioOpen, pioClose, pioWaitRead, pioWaitWrite
-
+from coachserver import SocketCloseCause, isShuttingDown
 const flushSendFlags = httpservercore.MSG_NOSIGNAL or MSG_DONTWAIT
 
 proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "")
@@ -77,22 +70,10 @@ template withSocketTimeout(ctx: HttpContext, waitCall: untyped) =
       cancel(timer)
 
 template parkRead(ctx: HttpContext) =
-  when defined(linux):
-    if ctx.pf != nil:
-      pioWaitRead(cast[PollFd](ctx.pf))
-    else:
-      waitReadable(int(ctx.socket))
-  else:
-    waitReadable(int(ctx.socket))
+  waitReadable(int(ctx.socket))
 
 template parkWrite(ctx: HttpContext) =
-  when defined(linux):
-    if ctx.pf != nil:
-      pioWaitWrite(cast[PollFd](ctx.pf))
-    else:
-      waitWritable(int(ctx.socket))
-  else:
-    waitWritable(int(ctx.socket))
+  waitWritable(int(ctx.socket))
 
 proc waitSocketReadable*(ctx: HttpContext) {.flow.} =
   let idleWait = ctx.requestlen == 0 and not ctx.bodyClockSet
@@ -121,19 +102,12 @@ proc sendSome*(ctx: HttpContext, data: pointer, length: int, flags: cint): Socke
     let ret = send(ctx.socket, cast[pointer](cast[int](data) + sent), (length - sent).cint, flags)
     if ret > 0:
       sent += ret
-      when defined(linux):
-        if ctx.pf != nil and sent < length:
-          # partial send: kernel buffer filled, drop the latched write
-          # readiness so the upcoming wait actually parks
-          cast[PollFd](ctx.pf).wrReady = false
       continue
     if ret < 0:
       let e = osLastError()
       if e.int == EINTR.int:
         continue
       if e.int in [EAGAIN.int, EWOULDBLOCK.int]:
-        when defined(linux):
-          if ctx.pf != nil: cast[PollFd](ctx.pf).wrReady = false   # see the header note
         ctx.waitSocketWritable()
         continue
       closeHttpSocket(ctx, NetErrored, osErrorMsg(e))
@@ -165,18 +139,11 @@ proc recvSome*(ctx: HttpContext, buf: pointer, n: int): int {.flow.} =
   while true:
     let r = recv(ctx.socket, buf, n.cint, MSG_DONTWAIT)
     if r >= 0:
-      when defined(linux):
-        if ctx.pf != nil and (r < n or r == 0):
-          # short read (or EOF): the socket is drained, clear the latch so
-          # the next wait parks instead of returning immediately
-          cast[PollFd](ctx.pf).rdReady = false
       return r
     let e = osLastError().int
     if e == EINTR.int:
       continue
     if e in [EAGAIN.int, EWOULDBLOCK.int]:
-      when defined(linux):
-        if ctx.pf != nil: cast[PollFd](ctx.pf).rdReady = false   # see the header note
       ctx.waitSocketReadable()
     else:
       return r
@@ -202,15 +169,6 @@ proc closeHttpSocket*(ctx: HttpContext, cause = CloseCalled, msg = "") =
   ctx.carryLen = 0
   ctx.carryStart = 0
   ctx.socket = INVALID_SOCKET
-  when defined(linux):
-    if ctx.pf != nil:
-      let p = cast[PollFd](ctx.pf)
-      ctx.pf = nil
-      # log/callback fire before pioClose: pioClose performs the real
-      # close(2) and recycles the handle, making `fd` invalid
-      logClose(ctx.server, fd, cause, msg)
-      if not isNil(ctx.server.onCloseSocketCallback):
-        ctx.server.onCloseSocketCallback(ctx.server, fd, cause, msg)
-      pioClose(p)
-      return
+  when declared(forgetFd):
+    forgetFd(int(fd))
   closeSocket(ctx.server, fd, cause, msg)

@@ -269,11 +269,6 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         when not defined(linux):
           if httpSrv.nodelay:
             setNoDelay(clientFd)
-        when defined(linux):
-          try:
-            ctx.pf = cast[pointer](pioOpen(clientFd.cint))
-          except OSError:
-            ctx.pf = nil         # fall back to the selector path
         while ctx.socket != INVALID_SOCKET and ctx.beginRequest():
           acquire(w.inflight)
           try:
@@ -359,8 +354,6 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
       {.cast(gcsafe).}:
         let worker = newWorker(w.runtime, w.nThreads)
         run workerMain(w.runtime, w.idx, worker)
-        when defined(linux):
-          pioDrain()             # free the thread's recycled PollFd handles + helper epoll
 
     rt.threads.setLen(nThreads)
     for i in 0 ..< nThreads:
