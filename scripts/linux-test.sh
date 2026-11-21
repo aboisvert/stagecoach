@@ -2,7 +2,7 @@
 # Run stagecoach builds/tests inside a Linux container (for macOS hosts).
 # usage: scripts/linux-test.sh [build|test|shell|bench|clean] [args...]
 # env:   PLATFORM=linux/amd64 to force emulated x86_64 (default: native)
-#        STAGECOACH_TEST_BACKEND=auto|ring|readiness
+#        STAGECOACH_TEST_BACKEND=auto|io_uring|epoll
 #        STAGECOACH_DOCKER_ALLOW_IO_URING=1 disables seccomp for the test container
 set -euo pipefail
 cd "$(dirname "$0")/.."

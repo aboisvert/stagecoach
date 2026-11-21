@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       backend:
-        description: STAGECOACH_TEST_BACKEND value (ring, readiness, or auto)
+        description: STAGECOACH_TEST_BACKEND value (io_uring, epoll, or auto)
         required: true
         type: string
 jobs:
@@ -33,7 +33,7 @@ jobs:
       - run: just test-integration
       - run: just examples
       - name: Test backend failure and override behavior
-        if: runner.os == 'Linux' && inputs.backend == 'ring'
+        if: runner.os == 'Linux' && inputs.backend == 'io_uring'
         run: |
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachTestRingUnavailable tests/integration/t_backend_startup.nim
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachIoUring -d:stagecoachTestRingFailOne tests/integration/t_backend_startup.nim

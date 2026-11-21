@@ -143,9 +143,9 @@ just linux-clean       # remove image and cache volumes
 To require each backend in tests:
 
 ```sh
-STAGECOACH_TEST_BACKEND=readiness just linux-test
-STAGECOACH_TEST_BACKEND=ring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test
-STAGECOACH_TEST_BACKEND=ring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test stress
+STAGECOACH_TEST_BACKEND=epoll just linux-test
+STAGECOACH_TEST_BACKEND=io_uring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test
+STAGECOACH_TEST_BACKEND=io_uring STAGECOACH_DOCKER_ALLOW_IO_URING=1 just linux-test stress
 ```
 
 The Docker opt-in disables seccomp filtering for the **test container**, because
@@ -167,7 +167,7 @@ Suites are discovered from their directory, so adding one needs no build-file
 or doc edit: drop `t_<name>.nim` into `tests/unit/`, `tests/integration/`, or
 `tests/stress/`. `scripts/run-tests.sh` is the single runner behind every
 command above (`all|unit|integration|stress|one <name>|list|check`).
-Set `STAGECOACH_TEST_BACKEND=ring` or `readiness` to compile tests and their
+Set `STAGECOACH_TEST_BACKEND=io_uring` or `epoll` to compile tests and their
 fixture servers with that backend required; the default is `auto`.
 
 Layers:
@@ -191,8 +191,8 @@ Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 
 | CI status (`main`) | Platform | I/O backend under test | What the badge means |
 |---|---|---|---|
-| [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`ring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
-| [![Ubuntu readiness tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | readiness (`readiness`) | Unit, integration, and example builds pass on Linux with the readiness (epoll) backend. |
+| [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`io_uring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
+| [![Ubuntu epoll tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | epoll (`epoll`) | Unit, integration, and example builds pass on Linux with the epoll backend. |
 | [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | readiness (`auto`, which selects readiness on macOS) | Unit, integration, and example builds pass on macOS. |
 
 A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.

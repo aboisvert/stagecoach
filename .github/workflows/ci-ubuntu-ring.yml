@@ -5,4 +5,4 @@ jobs:
     uses: ./.github/workflows/test-matrix.yml
     with:
       runner: ubuntu-latest
-      backend: ring
+      backend: io_uring

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run stagecoach test suites discovered under tests/<layer>/t_*.nim.
 # usage: scripts/run-tests.sh [all|unit|integration|stress|one <name>|list|check]
-# env:   NIM (default: nim), STAGECOACH_TEST_BACKEND (auto|ring|readiness)
+# env:   NIM (default: nim), STAGECOACH_TEST_BACKEND (auto|io_uring|epoll)
 #
 # The directory is the layer: unit (no listening socket or subprocess),
 # integration (fixture-server or self-hosted end-to-end), stress (release-built
@@ -18,9 +18,9 @@ die() { echo "run-tests: $*" >&2; exit 1; }
 
 case "${STAGECOACH_TEST_BACKEND:-auto}" in
   auto) ;;
-  ring) FLAGS+=(-d:stagecoachIoUring -d:stagecoachRingTest -d:stagecoachBackendTest) ;;
-  readiness) FLAGS+=(-d:stagecoachReadiness -d:stagecoachBackendTest) ;;
-  *) die "STAGECOACH_TEST_BACKEND must be auto, ring, or readiness" ;;
+  io_uring) FLAGS+=(-d:stagecoachIoUring -d:stagecoachRingTest -d:stagecoachBackendTest) ;;
+  epoll) FLAGS+=(-d:stagecoachReadiness -d:stagecoachBackendTest) ;;
+  *) die "STAGECOACH_TEST_BACKEND must be auto, io_uring, or epoll" ;;
 esac
 
 suites_in() { # layer -> sorted suite paths
