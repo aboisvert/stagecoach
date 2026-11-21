@@ -34,7 +34,7 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 
 - Nim ≥ 2.2.0
 - [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas), pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`
-- Build with `--threads:on` (Nim default for your config)
+- Build with `--threads:on --mm:atomicArc`. **`--mm:atomicArc` is required for multi-threaded use**: worker threads share `ref` objects such as `HttpServer`, and the default ORC/ARC reference counts are not atomic, so concurrent retain/release can corrupt memory (intermittent segfaults). This repository's `nim.cfg` sets both flags; add them to your own project's `nim.cfg` or command line.
 
 Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/flow`](stagecoach/flow.nim) in application code so `{.flow.}` works in your modules.
 
