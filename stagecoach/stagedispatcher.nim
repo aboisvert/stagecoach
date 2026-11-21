@@ -246,9 +246,18 @@ proc stop*(srv: HttpServer, drainms = 10_000) =
   let rt = srv.runtime
   if rt.isNil or rt.stopping.load(moRelaxed):
     return
+  # Snapshot the write ends before waking anyone: once the first worker is
+  # poked it can drain, exit, and let `wait` on another thread run
+  # `teardownRuntime`, which closes the pipes and empties `rt.shutdownPipes`.
+  # Iterating the live seq (or touching `rt`) after that is a use-after-free.
+  # A worker only exits after its own pipe was written, and `wait` joins all
+  # workers, so every fd in the snapshot is still open when it is written.
+  var wfds: seq[cint]
+  for (wfd, _) in rt.shutdownPipes:
+    wfds.add wfd
   rt.drainms = drainms
   rt.stopping.store(true, moRelease)
-  for (wfd, _) in rt.shutdownPipes:
+  for wfd in wfds:
     var b: array[1, char] = ['x']
     discard write(wfd, addr b[0], 1)
 
