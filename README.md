@@ -6,11 +6,13 @@
 
 # Stagecoach
 
-<p align="center">
-  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main" alt="Ubuntu io_uring tests"></a>
-  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main" alt="Ubuntu readiness tests"></a>
-  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main" alt="macOS tests"></a>
-</p>
+| CI status (`main`) | Platform | I/O backend under test | What the badge means |
+|---|---|---|---|
+| [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`ring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
+| [![Ubuntu readiness tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | readiness (`readiness`) | Unit, integration, and example builds pass on Linux with the readiness (epoll) backend. |
+| [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | readiness (`auto`, which selects readiness on macOS) | Unit, integration, and example builds pass on macOS. |
+
+A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
 
 HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime — a play on **stagelane** plus **transport** (like a stagecoach carrying requests).
 
