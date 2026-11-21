@@ -22,6 +22,10 @@ Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/fl
 
 ## Dependencies
 
+**Installation limitation:** Use a source checkout with Atlas as shown below.
+A direct Nimble installation or transitive Nimble dependency currently installs
+unpatched Stagelane and cannot compile Stagecoach.
+
 ```sh
 atlas install   # clones stagelane into deps/ and patches nim.cfg
 git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
@@ -165,7 +169,27 @@ Layers:
 Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 `tests/support_stream.nim`) stays at the `tests/` root.
 
-## Unreleased (hardening follow-up)
+## Release notes, 0.3.0
+
+### Linux I/O
+
+- Linux workers prefer io_uring on supported kernels and fall back to readiness
+  when it is unavailable. `-d:stagecoachIoUring` requires io_uring;
+  `-d:stagecoachReadiness` requires readiness. A required backend that cannot
+  start fails rather than silently falling back.
+- Ring-mode file responses use completion-based reads and writes, so a slow
+  reader does not block the worker. Timeout, cancellation, and shutdown paths
+  continue to be covered by both backend test suites.
+- Stagelane is pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`.
+  **Migration:** replace the former PollFd patch with
+  `patches/stagelane-scheduler-cleanup.patch` after dependency setup. The new
+  patch is required on every platform to release worker scheduler resources.
+  Helper procs called from flow handlers must themselves be `{.flow.}` when
+  they call potentially suspending operations such as `closeHttpSocket`.
+- **Installation limitation:** direct and transitive Nimble installations
+  cannot currently compile; use the Atlas source-checkout setup above.
+
+### HTTP hardening
 
 - Duplicate `Host` headers are rejected by default. `Host` is now tracked for
   identity even when it is not requested via `headerfields`, which lowers the
@@ -180,6 +204,13 @@ Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
   different listening port. `replyFile` now honours the send-buffer size bound,
   and the shutdown signal path walks non-allocating snapshots of the runtime
   and callback lists.
+
+### Testing
+
+- Test suites are discovered by layer from `tests/unit/`,
+  `tests/integration/`, and `tests/stress/`. Linux CI exercises both required
+  backends; Docker can opt in to a ring-capable test profile.
+- The README includes new Stagecoach artwork with optimized web assets.
 
 ## Release notes, 0.2 (hardening + lifecycle)
 

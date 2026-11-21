@@ -1,4 +1,4 @@
-version       = "0.2"
+version       = "0.3.0"
 author        = "Alex Boisvert"
 description   = "HTTP/1.1 server on the stagelane M:N async runtime (HTTP only on this branch)"
 license       = "MIT"

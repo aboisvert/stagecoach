@@ -172,5 +172,9 @@ and testing guidance. Preserve historical review/spec files as history.
 
 - [x] macOS: `just test`, `just stress`, `just examples` pass.
 - [x] Linux/Docker: full and stress suites pass with ring required and readiness forced; ring operations are evidenced.
-- [ ] GitHub CI and a separate native Linux host have not been exercised locally.
-- [ ] Clean install matches the exact SHA; no unintended changes; human review completed.
+- [x] A clean Atlas install matches the exact SHA and builds with the cleanup patch.
+
+GitHub CI must pass on the release commit before publication. No separate
+native Linux host was available; Linux verification ran in Docker.
+The release is explicitly Atlas-only because direct Nimble installs cannot
+apply the required Stagelane patch.
