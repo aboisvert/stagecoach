@@ -57,11 +57,11 @@ does not expose that cleanup in its normal build.
 
 ## I/O backend
 
-Linux workers prefer io_uring (Linux 5.11+) and fall back to readiness with a
+Linux workers prefer io_uring (Linux 5.11+) and fall back to epoll (aka "readiness") with a
 warning if it is unavailable. Compile with `-d:stagecoachIoUring` to require
 io_uring: `serve` fails if any worker cannot enable it. Compile with
-`-d:stagecoachReadiness` to require readiness instead. The flags are mutually
-exclusive; io_uring is Linux-only. macOS and BSD default to readiness.
+`-d:stagecoachReadiness` to require epoll/readiness instead. The flags are mutually
+exclusive; io_uring is Linux-only. macOS and BSD default to epoll/readiness.
 Within a flow handler, helper procs that call potentially suspending operations
 such as `reply`, `reject`, or `closeHttpSocket` must also be marked `{.flow.}`.
 
