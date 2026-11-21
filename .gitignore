@@ -20,3 +20,4 @@ nimdoc.out.css
 tests/**/*
 !tests/**/
 !tests/**/*.*
+.DS_Store
