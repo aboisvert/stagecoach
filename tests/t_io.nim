@@ -123,6 +123,14 @@ suite "beginRequest":
     check "417" in peerRecvAll(p.peer)
     p.closePeer()
 
+  test "a good Expect token cannot mask a bad one in the same list":
+    var p = newPair(mkServer())
+    check (run driveBegin(p.ctx, p.peer,
+      @["POST /x HTTP/1.1\r\nExpect: 100-continue, foo\r\nContent-Length: 0\r\n\r\n"], 0)) == brFalse
+    check closeCauses == @[ProtocolViolated]
+    check "417" in peerRecvAll(p.peer)
+    p.closePeer()
+
   test "Expect 100-continue then body":
     var p = newPair(mkServer())
     let hdr = "POST /x HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n"

@@ -48,18 +48,18 @@ suite "server defaults":
       discard newHttpServer(headerfields = ["Origin"])
     discard newHttpServer(headerfields = ["x-custom-1"])
 
-  test "more than 60 requested header fields are rejected":
-    # parseHeaders tracks seen wanted names in a 64-bit mask; 60 user fields
-    # plus the 4 always-tracked framing headers fill it exactly.
+  test "more than 59 requested header fields are rejected":
+    # parseHeaders tracks seen wanted names in a 64-bit mask; 59 user fields
+    # plus the 5 always-tracked headers (incl. host) fill it exactly.
     var fields: seq[string]
-    for i in 0 ..< 61: fields.add "x-f-" & $i
+    for i in 0 ..< 60: fields.add "x-f-" & $i
     expect ValueError:
       discard newHttpServer(headerfields = fields)
-    fields.setLen(60)
+    fields.setLen(59)
     discard newHttpServer(headerfields = fields)
     # the limit counts list entries (dedup happens later), so a list whose
     # unique count is lower still has to fit the entry bound itself
-    var withFraming: seq[string] = fields[0 ..< 59] & "connection"
+    var withFraming: seq[string] = fields[0 ..< 58] & "connection"
     discard newHttpServer(headerfields = withFraming)
 
   test "stop is a no-op before serve":
@@ -72,7 +72,7 @@ suite "context wanted set":
   test "framing headers are always tracked":
     for ct in [NoBody, Compact, Streaming]:
       let c = fresh(ct = ct).newHttpContext(INVALID_SOCKET)
-      for f in ["connection", "transfer-encoding", "content-length"]:
+      for f in ["connection", "transfer-encoding", "expect", "content-length", "host"]:
         check f in c.wanted
         check c.headers.hasKey(f)
 

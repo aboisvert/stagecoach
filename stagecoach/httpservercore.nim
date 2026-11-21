@@ -7,10 +7,11 @@ export coachserver
 
 type
   WantedIdx* = object
-    ## Indexes of the four always-tracked framing headers within
+    ## Indexes of the framing headers tracked in every mode within
     ## `ctx.wanted`/`ctx.headerStart`/`ctx.headerLen`. newHttpContext appends
     ## connection/transfer-encoding/expect/content-length (dedup'ed), so the
-    ## indexes are stable and -1 never occurs here.
+    ## indexes are stable and -1 never occurs here. `host` is always tracked
+    ## too, but only for duplicate detection (it has no WantedIdx field).
     conn*, te*, expect*, cl*: int
 
   HttpSpan* = object
@@ -161,11 +162,12 @@ proc newHttpServer*(loglevel = Level.lvlWarn, parserequestline = true,
       if c in {'A' .. 'Z'}:
         raise newException(ValueError,
           "Header field not in lower case (case-insensitive matching would never see it): " & field)
-  # 4 framing headers are added to `wanted`; parseHeaders tracks already-seen
-  # names in a 64-bit mask, so keep the total at or under 64.
-  if result.headerfields.len > 60:
+  # 5 headers are always added to `wanted` (connection, transfer-encoding,
+  # expect, content-length, host); parseHeaders tracks already-seen names in
+  # a 64-bit mask, so keep the total at or under 64.
+  if result.headerfields.len > 59:
     raise newException(ValueError,
-      "too many requested header fields (limit is 60; framing headers bring the total to 64)")
+      "too many requested header fields (limit is 59; framing/identity headers bring the total to 64)")
 
 proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result = HttpContext(server: server, socket: socket, bodystart: -1, keepAlive: true)
@@ -174,10 +176,12 @@ proc newHttpContext*(server: HttpServer, socket: SocketHandle): HttpContext =
   result.headers = newStringTable()
   for field in server.headerfields:
     result.wanted.add field
-  for field in ["connection", "transfer-encoding", "expect"]:
+  # `host` is tracked in every mode, not just when requested: a duplicate
+  # Host is a request-smuggling primitive, and framing rejects duplicates of
+  # any wanted identity header (see parseHeaders). It is not in WantedIdx
+  # because the parser never needs to read its value.
+  for field in ["connection", "transfer-encoding", "expect", "content-length", "host"]:
     if field notin result.wanted: result.wanted.add field
-  if "content-length" notin result.wanted:     # framing is validated in every mode
-    result.wanted.add "content-length"
   result.userFields = server.headerfields.len
   result.wantedIdx = WantedIdx(conn: result.wanted.find("connection"),
     te: result.wanted.find("transfer-encoding"), expect: result.wanted.find("expect"),

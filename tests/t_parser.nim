@@ -146,10 +146,23 @@ suite "HTTP parsing":
     ctx.load "GET / HTTP/1.1\c\LConnection: close\c\LConnection: keep-alive\c\L\c\L"
     check not ctx.parseAll(server)
 
-  test "duplicate unwanted headers are harmless":
+  test "duplicate host is rejected (smuggling primitive)":
+    # `host` is always tracked, even when not requested via `headerfields`.
     ctx.load "GET / HTTP/1.1\c\LHost: a\c\LHost: b\c\L\c\L"
+    check not ctx.parseAll(server)
+
+  test "duplicate unwanted headers are harmless":
+    ctx.load "GET / HTTP/1.1\c\LX-Other: a\c\LX-Other: b\c\L\c\L"
     check ctx.parseAll(server)
     check ctx.contentlength == 0
+
+  test "expect must be 100-continue and nothing else":
+    ctx.load "POST /x HTTP/1.1\c\LExpect: 100-Continue\c\LContent-Length: 0\c\L\c\L"
+    check ctx.parseAll(server)
+    for value in ["foo", "100-continue, foo", "foo, 100-continue", "100-continue,", "100-continue, "]:
+      ctx = server.newHttpContext(INVALID_SOCKET)
+      ctx.load "POST /x HTTP/1.1\c\LExpect: " & value & "\c\LContent-Length: 0\c\L\c\L"
+      check not ctx.parseAll(server)
 
   test "bare LF header line rejected":
     ctx.load "GET / HTTP/1.1\c\LHost: t\n\c\L\c\L"
@@ -219,6 +232,10 @@ suite "HTTP parsing: extended":
       ("GET /x http/1.1\c\L\c\L", false, "", ""),
       ("GET\c\L\c\Lxxxxxxxxxxxx", false, "", ""),
       ("G\tT /x HTTP/1.1\c\L\c\L", false, "", ""),
+      ("GET /a\tb HTTP/1.1\c\L\c\L", false, "", ""),   # tab in the target
+      ("GET /a\rb HTTP/1.1\c\L\c\L", false, "", ""),   # CR in the target
+      ("GET /x HTTP/1.1", false, "", ""),              # version but no CR: short read
+      ("GET /x HTTP/1.1\c", true, "GET", "/x"),        # CR is the last byte: full line
       ("GET /x\c\L\c\Lxxxxxxxxxxx", false, "", ""),
       ("GET /x", false, "", "")]
     for (raw, ok, m, u) in cases:

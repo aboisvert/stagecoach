@@ -11,9 +11,17 @@ export socketio
 
 # --- byte helpers -----------------------------------------------------------
 
-proc bytesEq(buf: string, start: int64, s: string): bool {.inline.} =
+proc bytesEq(buf: string, start: int64, s: string, validLen: int64): bool {.inline.} =
+  ## Byte-compare `s` against `buf[start ..]`, bounded by `validLen` (the
+  ## number of received bytes). Using the string's capacity here would let a
+  ## recycled context's stale bytes satisfy a comparison.
   if s.len == 0: return true
-  start >= 0 and start + s.len <= buf.len and equalMem(unsafeAddr buf[start], unsafeAddr s[0], s.len)
+  if start < 0 or start > validLen: return false
+  if s.len.int64 > validLen - start: return false
+  # `validLen <= buf.len` is a context invariant; keep the capacity check too
+  # so this helper is safe for any caller.
+  if start.int > buf.len or s.len > buf.len - start.int: return false
+  equalMem(unsafeAddr buf[start.int], unsafeAddr s[0], s.len)
 
 proc eqLower(buf: string, start, len: int, lowerName: string): bool {.inline.} =
   if len != lowerName.len: return false
@@ -59,11 +67,24 @@ proc parseRequestLine*(ctx: HttpContext, server: HttpServer): bool =
   if unlikely(ctx.urilen == 0):
     ctx.reject(Http400, ProtocolViolated, "empty request target")
     return false
+  # RFC 7230 3.1.1: a request target may not contain whitespace or control
+  # characters. The scan above stops at spaces, but tabs, CR/LF and DEL would
+  # survive into `getUri()`; reflecting those into a response header is a
+  # response-splitting primitive. They are malformed even if the version tail
+  # happens to parse.
+  for k in 0 ..< ctx.urilen.int:
+    let c = ctx.request[ctx.uristart + k]
+    if c <= ' ' or c == '\x7f':
+      ctx.reject(Http400, ProtocolViolated, "invalid request target")
+      return false
   let ver = ctx.uristart + ctx.urilen + 1
-  if unlikely(ctx.requestlen < ver + 8):
+  # "HTTP/1." (7 bytes) + version digit + CR: to read the CR at `ver + 8`
+  # the valid length must cover `ver + 9` bytes. A short buffer used to pass
+  # this check and then read one byte past `requestlen`.
+  if unlikely(ctx.requestlen < ver + 9):
     ctx.reject(Http400, ProtocolViolated, "parseRequestLine: no version")
     return false
-  if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.") or ctx.request[ver + 7] notin {'0', '1'} or
+  if unlikely(not ctx.request.bytesEq(ver, "HTTP/1.", ctx.requestlen) or ctx.request[ver + 7] notin {'0', '1'} or
       ctx.request[ver + 8] != '\c'):
     ctx.reject(Http400, ProtocolViolated, "request not HTTP/1.x")
     return false
@@ -104,6 +125,28 @@ proc hasTokenIn(buf: string, start, len: int, token: string): bool =
     i = j + 1
   false
 
+proc onlyTokenIn(buf: string, start, len: int, token: string): bool =
+  ## True only when every comma-separated token in the slice equals `token`
+  ## (case-insensitive). Empty tokens (a leading/trailing/doubled comma) count
+  ## as an unknown value and fail. Used for `Expect`, where RFC 7231 5.1.1 lets
+  ## a server reject the whole request if it does not understand any
+  ## expectation in the list - unlike `hasTokenIn`, a single good token
+  ## must not mask a bad one.
+  var i = start
+  let e = start + len
+  var found = false
+  while i <= e:
+    var j = i
+    while j < e and buf[j] != ',': inc j
+    var a = i
+    var z = j
+    while a < z and buf[a] in {' ', '\t'}: inc a
+    while z > a and buf[z - 1] in {' ', '\t'}: dec z
+    if z == a or not eqLower(buf, a, z - a, token): return false
+    found = true
+    i = j + 1
+  found
+
 proc headerFieldSlice(ctx: HttpContext, name: string): string {.inline.} =
   let wi = ctx.wanted.find(name)
   if wi < 0: return ""
@@ -133,8 +176,9 @@ proc parseHeaders*(ctx: HttpContext): bool =
   while i < hdrEnd and ctx.request[i] != '\l':   # skip the request line
     inc i
   inc i
-  # 64-bit mask: at most 64 wanted names (60 user fields + 4 framing headers),
-  # enforced by newHttpServer; a wider mask would need per-name bookkeeping.
+  # 64-bit mask: at most 64 wanted names (59 user fields + 5 always-tracked
+  # framing/identity headers), enforced by newHttpServer; a wider mask would
+  # need per-name bookkeeping.
   var seen: uint64 = 0                    # bitmask: wanted names already matched
   while i < hdrEnd:
     var eol = i
@@ -196,15 +240,17 @@ proc requestLineIsHttp10(ctx: HttpContext): bool =
 proc processHeaders*(ctx: HttpContext, server: HttpServer): bool =
   ## Validates framing headers (Content-Length, Transfer-Encoding) and decides
   ## keep-alive. Closes the socket and returns false on a protocol violation.
-  ctx.headOnly = ctx.requestlen >= 5 and ctx.request.bytesEq(0, "HEAD ")
+  ctx.headOnly = ctx.requestlen >= 5 and ctx.request.bytesEq(0, "HEAD ", ctx.requestlen)
   if not ctx.parseHeaders():
     return false
   if ctx.headerLen[ctx.wantedIdx.te] > 0:
     ctx.reject(Http501, ProtocolViolated, "transfer-encoding not supported")
     return false
   let ei = ctx.wantedIdx.expect
-  if ctx.headerLen[ei] > 0 and not ctx.request.hasTokenIn(ctx.headerStart[ei], ctx.headerLen[ei], "100-continue"):
-    # Any expectation other than 100-continue is rejected before reading a body.
+  if ctx.headerLen[ei] > 0 and not ctx.request.onlyTokenIn(ctx.headerStart[ei], ctx.headerLen[ei], "100-continue"):
+    # Every expectation must be 100-continue: a single good token may not
+    # mask an unsupported one in the same list (RFC 7231 5.1.1). Reject before
+    # reading a body.
     ctx.reject(Http417, ProtocolViolated, "expectation failed")
     return false
   block framing:
@@ -249,10 +295,10 @@ proc getUri*(ctx: HttpContext): string =
   ctx.request[ctx.uristart ..< ctx.uristart + ctx.urilen]
 
 proc isUri*(ctx: HttpContext, uri: string): bool =
-  ctx.urilen == uri.len and ctx.request.bytesEq(ctx.uristart, uri)
+  ctx.urilen == uri.len and ctx.request.bytesEq(ctx.uristart, uri, ctx.requestlen)
 
 proc startsUri*(ctx: HttpContext, uristart: string): bool =
-  ctx.urilen >= uristart.len and ctx.request.bytesEq(ctx.uristart, uristart)
+  ctx.urilen >= uristart.len and ctx.request.bytesEq(ctx.uristart, uristart, ctx.requestlen)
 
 proc getMethod*(ctx: HttpContext): string =
   if ctx.methlen == 0:
@@ -260,7 +306,7 @@ proc getMethod*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.methlen]
 
 proc isMethod*(ctx: HttpContext, amethod: string): bool =
-  ctx.methlen == amethod.len and ctx.request.bytesEq(0, amethod)
+  ctx.methlen == amethod.len and ctx.request.bytesEq(0, amethod, ctx.requestlen)
 
 proc bodyEnd*(ctx: HttpContext): int64 {.inline.} =
   ## End offset (exclusive) of this request's body inside `ctx.request`;
@@ -275,7 +321,7 @@ proc getBody*(ctx: HttpContext): string =
 
 proc isBody*(ctx: HttpContext, body: string): bool =
   ctx.bodystart >= 0 and ctx.bodyEnd - ctx.bodystart == body.len and
-    ctx.request.bytesEq(ctx.bodystart, body)
+    ctx.request.bytesEq(ctx.bodystart, body, ctx.bodyEnd)
 
 proc getRequest*(ctx: HttpContext): string =
   ctx.request[0 ..< ctx.requestlen]
@@ -321,7 +367,7 @@ proc queryParam*(ctx: HttpContext, name: string): HttpSpan =
     while j < q.len.int and ctx.request[q.start.int + j] != '&': inc j
     var e = i
     while e < j and ctx.request[q.start.int + e] != '=': inc e
-    if e - i == name.len and (name.len == 0 or ctx.request.bytesEq(q.start + i, name)):
+    if e - i == name.len and (name.len == 0 or ctx.request.bytesEq(q.start + i, name, ctx.requestlen)):
       if e < j:
         return HttpSpan(start: q.start + e + 1, len: (j - e - 1).int64)
       return HttpSpan()
