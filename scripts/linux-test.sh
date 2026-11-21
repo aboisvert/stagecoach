@@ -54,7 +54,7 @@ case "$cmd" in
   bench)
     docker compose build -q
     export REQUESTS="${REQUESTS:-20000}" CONCURRENCY="${CONCURRENCY:-200}"
-    RUN_BENCH=(docker compose run --rm -e REQUESTS -e CONCURRENCY)
+    RUN_BENCH=(docker compose run --rm -e "REQUESTS=$REQUESTS" -e "CONCURRENCY=$CONCURRENCY")
     [ -t 0 ] || RUN_BENCH+=(--no-TTY)
     "${RUN_BENCH[@]}" linux bash -c "$setup_stagelane
       set -euo pipefail
