@@ -14,6 +14,22 @@ HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](
 
 This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-request dispatchers were removed in favor of stagelane.
 
+**Contents**
+
+- [Requirements](#requirements)
+- [Dependencies](#dependencies)
+- [I/O backend](#io-backend)
+- [Quick start](#quick-start)
+- [Examples](#examples)
+- [API overview](#api-overview)
+- [Running Linux tests on macOS (Docker)](#running-linux-tests-on-macos-docker)
+- [Testing](#testing)
+- [CI status](#ci-status)
+- [Release notes, 0.3.0](#release-notes-030)
+- [Release notes, 0.2 (hardening + lifecycle)](#release-notes-02-hardening--lifecycle)
+- [Release notes, 0.1 (stagelane port)](#release-notes-01-stagelane-port)
+- [Older notes (pre-stagelane)](#older-notes-pre-stagelane)
+
 ## Requirements
 
 - Nim ≥ 2.2.0
