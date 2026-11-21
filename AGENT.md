@@ -110,18 +110,27 @@ See README § Testing for the suites, layers, and commands. Agent-specific:
   for that reason.
 - Keep tests deterministic: free ports, bounded `waitFor` polling, no arbitrary
   sleeps. Keep stress-test failures replayable.
+- Callbacks that capture results into module globals use `{.cast(gcsafe).}`
+  around the mutation (see `tests/t_core.nim`). Prefer the server's
+  observation callbacks over shared global state where possible.
 - Add the regression test with the fix: `t_parser` for framing/parsing,
   `t_http`/`t_io` for wire and connection behavior.
 
 ## Before finishing
 
 - Full suite green: README § Testing.
+- Stress suite for concurrency/timing/soak changes: `just stress` (not part of
+  `just test`).
+- Examples still compile: README § Examples.
 - Linux/PollFd/sendfile changes: README § Running Linux tests on macOS (Docker).
 - Public behavior changes: update README and any relevant `specs/` phase doc.
 - Keep the version in `stagecoach.nimble` and `StagecoachVersion` in
   `stagecoach/coachserver.nim` in sync.
+- No incidental changes to `nim.cfg` / `atlas.lock` unless the dependency
+  change is intentional.
 - Commit style matches history: imperative, sentence-case subject with a
-  trailing period, small atomic commits.
+  trailing period, small atomic commits. No conventional-commit prefixes
+  (`feat:`, `fix:`, …); `Spec:`-prefixed subjects track spec/phase progress.
 
 ## Known quirks
 
