@@ -1,0 +1,8 @@
+name: ci-macos
+on: [push, pull_request]
+jobs:
+  test:
+    uses: ./.github/workflows/test-matrix.yml
+    with:
+      runner: macos-latest
+      backend: auto

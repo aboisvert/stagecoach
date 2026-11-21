@@ -6,6 +6,12 @@
 
 # Stagecoach
 
+<p align="center">
+  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main" alt="Ubuntu io_uring tests"></a>
+  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main" alt="Ubuntu readiness tests"></a>
+  <a href="https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml"><img src="https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main" alt="macOS tests"></a>
+</p>
+
 HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime — a play on **stagelane** plus **transport** (like a stagecoach carrying requests).
 
 > **Experimental:** This library is experimental; APIs and behavior may change without notice. It is based on [GuildenStern](https://github.com/olliNiinivaara/GuildenStern), the Nim HTTP server framework, ported to run on stagelane (async runtime) instead of the original thread-per-request dispatchers.

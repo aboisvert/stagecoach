@@ -1,0 +1,8 @@
+name: ci-ubuntu-ring
+on: [push, pull_request]
+jobs:
+  test:
+    uses: ./.github/workflows/test-matrix.yml
+    with:
+      runner: ubuntu-latest
+      backend: ring

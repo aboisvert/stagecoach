@@ -1,19 +1,22 @@
-name: ci
-on: [push, pull_request]
+name: test-matrix
+# Reusable test job. Each platform/backend has a thin caller workflow so that
+# GitHub can render a separate status badge per platform.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner label
+        required: true
+        type: string
+      backend:
+        description: STAGECOACH_TEST_BACKEND value (ring, readiness, or auto)
+        required: true
+        type: string
 jobs:
   test:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            backend: ring
-          - os: ubuntu-latest
-            backend: readiness
-          - os: macos-latest
-            backend: auto
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ inputs.runner }}
     env:
-      STAGECOACH_TEST_BACKEND: ${{ matrix.backend }}
+      STAGECOACH_TEST_BACKEND: ${{ inputs.backend }}
     steps:
       - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
@@ -30,7 +33,7 @@ jobs:
       - run: just test-integration
       - run: just examples
       - name: Test backend failure and override behavior
-        if: runner.os == 'Linux' && matrix.backend == 'ring'
+        if: runner.os == 'Linux' && inputs.backend == 'ring'
         run: |
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachTestRingUnavailable tests/integration/t_backend_startup.nim
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachIoUring -d:stagecoachTestRingFailOne tests/integration/t_backend_startup.nim

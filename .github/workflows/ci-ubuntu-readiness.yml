@@ -1,0 +1,8 @@
+name: ci-ubuntu-readiness
+on: [push, pull_request]
+jobs:
+  test:
+    uses: ./.github/workflows/test-matrix.yml
+    with:
+      runner: ubuntu-latest
+      backend: readiness
