@@ -51,9 +51,9 @@ such as `reply`, `reject`, or `closeHttpSocket` must also be marked `{.flow.}`.
 
 ## Quick start
 
-<p align="center">
+<div align="center">
   <img src="logo/web/galloping-western-stagecoach.webp" alt="Stagecoach galloping across the desert" width="560">
-</p>
+</div>
 
 ```nim
 import stagecoach/[flow, httpserver]
