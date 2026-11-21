@@ -1,6 +1,8 @@
-<p align="center">
+<div align="center">
   <img src="logo/web/rustic-western-stagecoach-sign.webp" alt="Stagecoach — HTTP server for POSIX" width="800">
-</p>
+  <br>
+  <img src="logo/web/stagecoach_sticker_logo.webp" alt="Stagecoach logo" width="560">
+</div>
 
 # Stagecoach
 
