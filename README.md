@@ -112,6 +112,22 @@ Layers:
 - `t_http`, `t_modes`, `t_limits`, `t_shutdown`: spawn `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`).
 - `t_stress`: seeded concurrent pipelined clients with abrupt disconnects, close accounting and an RSS growth check. The seed is printed so a failure can be replayed.
 
+## Unreleased (hardening follow-up)
+
+- Duplicate `Host` headers are rejected by default. `Host` is now tracked for
+  identity even when it is not requested via `headerfields`, which lowers the
+  user-field budget from 60 to 59 (the parser's bitmask holds 64 names total).
+- `Expect` accepts only `100-continue`: every token in the list must match, so
+  `Expect: 100-continue, foo` receives 417 instead of being treated as a
+  continue hint.
+- Request targets containing whitespace or control characters (tab, CR, LF,
+  DEL) receive 400, and request-line parsing no longer reads past the bytes
+  actually received on short input.
+- Out-of-range ports are rejected at `serve` time instead of wrapping to a
+  different listening port. `replyFile` now honours the send-buffer size bound,
+  and the shutdown signal path walks non-allocating snapshots of the runtime
+  and callback lists.
+
 ## Release notes, 0.2 (hardening + lifecycle)
 
 - Request framing is stricter: duplicate wanted headers (a smuggling

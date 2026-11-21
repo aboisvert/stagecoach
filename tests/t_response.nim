@@ -104,10 +104,14 @@ proc replyWithSlowReader(ctx: HttpContext, sink: ptr Sink, n: int) {.flow.} =
 proc bigReply(ctx: HttpContext, n: int) {.flow.} = ctx.reply(repeat('b', n))
 
 suite "sendBuf reuse":
-  test "small responses keep the buffer, big ones drop it":
+  test "flushed replies leave sendBuf empty for small and large bodies":
+    # Nim strings do not expose capacity, so only the observable post-flush
+    # length is asserted here; whether the backing buffer is retained for a
+    # small reply or dropped for a large one is an implementation detail of
+    # flushSendBuf/replyFile.
     var p = newPair(mkServer())
     run doBody(p.ctx)
-    check p.ctx.sendBuf.len == 0     # flushed; the buffer is kept for reuse
+    check p.ctx.sendBuf.len == 0
     let s = mkServer()
     s.sockettimeoutms = 3000
     var p2 = newPair(s)
@@ -191,9 +195,6 @@ suite "sendDate and replyFile":
     check "Content-Length: 6" in got
     check "secret" notin got
 
-when isMainModule:
-  echo "Response tests finished"
-
 suite "replyFile MIME types":
   test "content types by extension (case-insensitive, unknown falls back)":
     let exts = [
@@ -248,3 +249,6 @@ suite "review regressions":
     run doMissing(p.ctx)
     check not p.ctx.responded
     p.closePeer()
+
+when isMainModule:
+  echo "Response tests finished"

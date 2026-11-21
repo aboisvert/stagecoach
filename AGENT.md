@@ -61,10 +61,13 @@ Internal modules an agent will usually touch:
 - Framing is intentionally strict. Reject duplicate `Content-Length` /
   `Transfer-Encoding` / `Connection` / `Expect` / `Host`, bare-LF header lines,
   whitespace before the colon, request `Transfer-Encoding`, invalid or negative
-  `Content-Length`, non-`tchar` methods, and junk after the HTTP version.
+  `Content-Length`, non-`tchar` methods, control characters in the request
+  target, any `Expect` token other than `100-continue`, and junk after the
+  HTTP version. `Host` is tracked by default solely for duplicate detection.
 - `Connection: close` wins over every other token.
 - Header field names requested via `headerfields` must be lower-case; at most
-  60 user fields (the parser tracks 64 total in a bitmask).
+  59 user fields (the parser tracks 64 total in a bitmask: 59 user + 5 always
+  tracked framing/identity headers, including `host`).
 - Never echo exception text to a client. Log it and send a generic 500.
 - Once `ctx.responded` is set, never emit a second status line; close instead.
 - Every framing change needs a regression test in `t_parser` or `t_http`.

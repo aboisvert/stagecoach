@@ -392,6 +392,34 @@ Same-server restart keeps working (the pool dies with its worker thread).
 stagecoach/stagedispatcher.nim
 ```
 
+## Phase 9: framing identity, expectations, and target validation
+
+A whole-codebase review found five residual gaps in the strict-framing path,
+all fixed with regression tests:
+
+- **Duplicate `Host` was not rejected by default.** `host` was only in
+  `ctx.wanted` when a caller requested it via `headerfields`, so the duplicate
+  check never saw it. `newHttpContext` now always tracks `host` (for identity
+  only, no `WantedIdx` field), which lowers the user-field budget from 60 to 59
+  to keep the 64-bit `seen` mask exact. `t_parser` now asserts rejection and
+  that a truly unwanted duplicate is still harmless.
+- **`Expect` let a good token mask a bad one.** `hasTokenIn` only proved that
+  `100-continue` appeared somewhere in the list. `onlyTokenIn` requires every
+  token to match, so `100-continue, foo` gets 417 (RFC 7231 5.1.1). Covered in
+  `t_parser` and at the wire level in `t_io`.
+- **The request target was never validated.** The scan stopped at spaces but
+  allowed tab/CR/LF/DEL, which can be reflected into response headers.
+  `parseRequestLine` now rejects control bytes in the target (`t_parser`
+  request-line table).
+- **Off-by-one in `parseRequestLine`.** The length guard checked `ver + 8` but
+  read `request[ver + 8]`; it now requires `ver + 9`. `bytesEq` also bounds
+  comparisons by `requestlen` (or `bodyEnd`) rather than string capacity, so a
+  recycled context's stale bytes cannot satisfy a comparison.
+- **Bookkeeping cleanups.** `replyFile` checks the buffer size before clearing
+  it; the redundant 32 KB flush branch in `connectionLoop` was removed;
+  `shutdown()` and `pokeAllShutdownPipes` take non-allocating descriptor
+  snapshots in signal context; `setupRuntime` validates the port range.
+
 ## Follow-ups (deferred)
 
 - Timer-allocation churn in `withSocketTimeout` (per-EAGAIN closure + timer):
