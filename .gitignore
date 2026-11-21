@@ -13,5 +13,9 @@ docs.out
 *.idx
 nimdoc.out.css
 
+# Ignore compiled test binaries (extensionless) while keeping test sources,
+# helpers, and fixtures tracked. Unignoring the directories is required, or the
+# negation below cannot re-include files inside an ignored directory.
 tests/**/*
+!tests/**/
 !tests/**/*.*
