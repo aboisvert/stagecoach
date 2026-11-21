@@ -1,7 +1,7 @@
 ## Stress / soak: concurrent pipelined clients, abrupt disconnects, close
 ## accounting and RSS growth. Not part of the default run (`just stress`).
 import std/[unittest, strutils, random, os, tables, times, locks, strformat]
-import helpers/fixture
+import ../helpers/fixture
 
 const
   clients = 200

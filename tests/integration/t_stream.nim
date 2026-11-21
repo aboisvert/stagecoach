@@ -1,6 +1,6 @@
 import std/[unittest, net, os, osproc, strutils, times]
 import std/nativesockets
-import helpers/rawclient
+import ../helpers/rawclient
 
 const testPort = 18093
 

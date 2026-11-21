@@ -1,5 +1,5 @@
 import std/[unittest, strutils, random, tables]
-import helpers/fixture
+import ../helpers/fixture
 
 var fx: Fixture
 

@@ -1,5 +1,5 @@
 import std/[unittest, posix, net]
-import helpers/fixture
+import ../helpers/fixture
 import stagecoach/httpserver
 
 suite "process shutdown":

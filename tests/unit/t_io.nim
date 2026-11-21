@@ -2,7 +2,7 @@
 import std/[unittest, strutils, atomics]
 import stagecoach/[flow, httpserver]
 import stagelane/sched
-import helpers/pairs
+import ../helpers/pairs
 
 var closeCauses: seq[SocketCloseCause]
 

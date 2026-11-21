@@ -37,13 +37,17 @@ case "$cmd" in
   build)
     docker compose build "$@" ;;
   test)
+    # Run the same discovered suites as `just test`; `nimble test` would fetch
+    # an unpatched stagelane. Optional layer: `just linux-test unit`.
+    suite="${1:-all}"
+    case "$suite" in
+      all|unit|integration|stress) ;;
+      *) echo "unknown suite: $suite (all|unit|integration|stress)" >&2; exit 2 ;;
+    esac
     docker compose build -q
-    # nimble test would fetch an unpatched stagelane; mirror justfile test targets instead.
     in_container "$setup_stagelane
-      for t in core parser io response pollfd http modes limits shutdown stop stream; do
-        nim c -r --hints:off --threads:on --outdir:bin tests/t_\${t}.nim || exit 1
-      done
-    " "$@" ;;
+      bash scripts/run-tests.sh $suite
+    " ;;
   shell)
     docker compose build -q
     "${RUN[@]}" linux bash ;;

@@ -1,35 +1,25 @@
-# Stagecoach test recipes. Every suite builds into bin/.
-nim := "nim c -r --hints:off --threads:on --outdir:bin"
+# Stagecoach test recipes. Suites live in tests/<layer>/ and are discovered by
+# scripts/run-tests.sh; add a suite there, not to a list here.
 
 default: test
 
-# pure unit + in-process socketpair suites
+# unit layer: no listening socket or subprocess (tests/unit/)
 test-unit:
-    {{nim}} tests/t_core.nim
-    {{nim}} tests/t_parser.nim
-    {{nim}} tests/t_io.nim
-    {{nim}} tests/t_response.nim
-    {{nim}} tests/t_pollfd.nim
+    bash scripts/run-tests.sh unit
 
-# suites that spawn bin/fixture_server (tests/fixture_server.nim)
+# integration layer: fixture-server or self-hosted end-to-end (tests/integration/)
 test-integration:
-    {{nim}} tests/t_http.nim
-    {{nim}} tests/t_modes.nim
-    {{nim}} tests/t_limits.nim
-    {{nim}} tests/t_slowlap.nim
-    {{nim}} tests/t_shutdown.nim
-    {{nim}} tests/t_stop.nim
-    {{nim}} tests/t_stream.nim
+    bash scripts/run-tests.sh integration
 
 test: test-unit test-integration
 
-# run a single suite, e.g. `just test-one http`
+# run a single suite from any layer, e.g. `just test-one http`
 test-one name:
-    {{nim}} tests/t_{{name}}.nim
+    bash scripts/run-tests.sh one {{name}}
 
 # concurrency / soak tests (release build, not part of `test`)
 stress:
-    nim c -r -d:release --hints:off --threads:on --outdir:bin tests/t_stress.nim
+    bash scripts/run-tests.sh stress
 
 # compile every example without running it
 examples:

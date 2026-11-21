@@ -7,14 +7,14 @@
 ## for the connection's whole life and the handler runs inside it. These
 ## tests pin that invariant: >QueueSize requests on other connections while
 ## /sleep parks, then the slow connection must answer at once.
-import std/[unittest, strutils, os]
-import helpers/fixture
+import std/[unittest, strutils, tables]
+import ../helpers/fixture
 
 const
   slowMs = 4000               # handler runtime; the quick loop finishes well inside it
   quickRequests = 260         # the report's failing count (> QueueSize = 200)
   quickConns = 4              # keep-alive connections the quick requests cycle over
-  readTimeoutMs = 5000        # a healthy next answer needs ~0ms; the old bug never answered
+  readTimeoutMs = slowMs + 5000  # a healthy next answer needs ~0ms; the old bug never answered
 
 var fx: Fixture
 
@@ -46,7 +46,9 @@ suite "keep-alive survives a slow handler":
     let slow = connectRaw(fx.port)
     defer: slow.close()
     slow.sendRaw "GET /sleep?ms=" & $slowMs & " HTTP/1.1\r\nHost: t\r\n\r\n"
-    sleep(200)                       # let the handler park on delay()
+    # Wait until the fixture reports the handler parked instead of sleeping a
+    # fixed amount: the second request must arrive while it is in flight.
+    check waitFor(2000, proc (): bool = stats(fx).getOrDefault("inflightNow") == 1)
     slow.sendRaw "GET /echo?i=midflight HTTP/1.1\r\nHost: t\r\n\r\n"
     let rs = slow.readResponses(2, readTimeoutMs)
     check rs[0].body == "slept"

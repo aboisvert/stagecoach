@@ -3,7 +3,7 @@
 import std/[unittest, strutils, posix, nativesockets, os]
 import stagecoach/[flow, httpserver]
 import stagelane/sched
-import helpers/pairs
+import ../helpers/pairs
 
 proc mkServer(): HttpServer =
   result = newHttpServer(loglevel = lvlError)
