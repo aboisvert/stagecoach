@@ -6,14 +6,6 @@
 
 # Stagecoach
 
-| CI status (`main`) | Platform | I/O backend under test | What the badge means |
-|---|---|---|---|
-| [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`ring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
-| [![Ubuntu readiness tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | readiness (`readiness`) | Unit, integration, and example builds pass on Linux with the readiness (epoll) backend. |
-| [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | readiness (`auto`, which selects readiness on macOS) | Unit, integration, and example builds pass on macOS. |
-
-A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
-
 HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime — a play on **stagelane** plus **transport** (like a stagecoach carrying requests).
 
 > **Experimental:** This library is experimental; APIs and behavior may change without notice. It is based on [GuildenStern](https://github.com/olliNiinivaara/GuildenStern), the Nim HTTP server framework, ported to run on stagelane (async runtime) instead of the original thread-per-request dispatchers.
@@ -178,6 +170,16 @@ Layers:
 
 Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 `tests/support_stream.nim`) stays at the `tests/` root.
+
+## CI status
+
+| CI status (`main`) | Platform | I/O backend under test | What the badge means |
+|---|---|---|---|
+| [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`ring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
+| [![Ubuntu readiness tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | readiness (`readiness`) | Unit, integration, and example builds pass on Linux with the readiness (epoll) backend. |
+| [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | readiness (`auto`, which selects readiness on macOS) | Unit, integration, and example builds pass on macOS. |
+
+A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
 
 ## Release notes, 0.3.0
 
