@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo/web/rustic-western-stagecoach-sign.webp" alt="Stagecoach — HTTP server for POSIX" width="800">
+</p>
+
 # Stagecoach
 
 HTTP/1.1 server for POSIX systems (Linux, BSD, macOS), built on the [stagelane](https://github.com/ghazalialshafi/stagelane) M:N runtime — a play on **stagelane** plus **transport** (like a stagecoach carrying requests).
@@ -40,6 +44,10 @@ Within a flow handler, helper procs that call potentially suspending operations
 such as `reply`, `reject`, or `closeHttpSocket` must also be marked `{.flow.}`.
 
 ## Quick start
+
+<p align="center">
+  <img src="logo/web/galloping-western-stagecoach.webp" alt="Stagecoach galloping across the desert" width="560">
+</p>
 
 ```nim
 import stagecoach/[flow, httpserver]
