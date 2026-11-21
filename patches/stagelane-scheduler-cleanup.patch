@@ -1,0 +1,32 @@
+diff --git a/src/stagelane/sched.nim b/src/stagelane/sched.nim
+--- a/src/stagelane/sched.nim
++++ b/src/stagelane/sched.nim
+@@ -1259,12 +1259,18 @@ when flowThreads:
+-  proc releaseSched*(keepShared = false) =
+-    ## free the scheduler of the calling (worker) thread; called on thread exit.
+-    ## With `keepShared` the mailbox/wake-up event stay allocated for the joiner
+-    ## to `freeShared`.
+-    drainPools()
++const stagecoachSchedCleanup* = true
++
++proc releaseSched*(keepShared = false) =
++  ## Free the calling thread's scheduler after all its tasks have stopped.
++  ## With flowThreads and `keepShared`, the joiner must call `freeShared`.
++  drainPools()
+-    if theSched == nil: return
++  if theSched == nil: return
++  when flowThreads:
+     let sh = theSched.shared
+-    when defined(linux):
+-      if theSched.ring != nil: theSched.ring.close()
+-    if theSched.sel != nil: theSched.sel.close()
+-    theSched = nil
++  when defined(linux):
++    if theSched.ring != nil: theSched.ring.close()
++  if theSched.sel != nil: theSched.sel.close()
++  when defined(linux):
++    if theSched.pepOn:
++      discard posix.close(theSched.pepFd)
++  theSched = nil
++  when flowThreads:
+     if not keepShared: freeShared(sh)
