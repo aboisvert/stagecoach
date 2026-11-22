@@ -3,7 +3,7 @@
 ## Overview
 
 Add GitHub Actions status badges to the README, one per platform/backend
-entry of the CI matrix (Ubuntu io_uring, Ubuntu readiness, macOS).
+entry of the CI matrix (Ubuntu io_uring, Ubuntu epoll, macOS).
 
 ## Architecture Decisions
 
@@ -11,7 +11,7 @@ entry of the CI matrix (Ubuntu io_uring, Ubuntu readiness, macOS).
   workflow can only show one aggregate badge.
 - The test steps move into a reusable workflow (`test-matrix.yml`,
   `workflow_call`) so they are defined once. Each platform gets a thin caller
-  workflow (`ci-ubuntu-ring.yml`, `ci-ubuntu-readiness.yml`, `ci-macos.yml`),
+  workflow (`ci-ubuntu-ring.yml`, `ci-ubuntu-epoll.yml`, `ci-macos.yml`),
   and each caller has its own badge.
 - The old `ci.yml` is removed so tests do not run twice.
 - Badges link to each workflow's Actions page and track `branch=main`.

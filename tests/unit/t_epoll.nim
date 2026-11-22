@@ -1,4 +1,4 @@
-## Socket readiness behavior independent of the scheduler's internal latches.
+## Socket epoll behavior independent of the scheduler's internal latches.
 import std/unittest
 import stagelane/sched
 import stagecoach/[flow, httpserver, socketio]
@@ -53,7 +53,7 @@ proc boundedCancel(p: Pair): bool {.flow.} =
 proc boundedReuse(): bool {.flow.} =
   withTimeout(3000, exerciseReusedSockets())
 
-suite "socket readiness":
+suite "socket epoll":
   test "a drained socket wakes for later data":
     var p = newPair(newHttpServer(loglevel = lvlError))
     watchPair(p)
@@ -72,4 +72,4 @@ suite "socket readiness":
     check (run boundedReuse())
 
 when isMainModule:
-  echo "Readiness tests finished"
+  echo "Epoll tests finished"

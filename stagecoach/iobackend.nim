@@ -1,17 +1,17 @@
 ## Compile-time policy for selecting a worker's I/O backend.
 
-when defined(stagecoachIoUring) and defined(stagecoachReadiness):
-  {.error: "stagecoachIoUring and stagecoachReadiness are mutually exclusive".}
+when defined(stagecoachIoUring) and defined(stagecoachEpoll):
+  {.error: "stagecoachIoUring and stagecoachEpoll are mutually exclusive".}
 when defined(stagecoachIoUring) and not defined(linux):
   {.error: "stagecoachIoUring requires Linux".}
 
 type IoBackendPolicy* = enum
-  preferIoUring, requireIoUring, requireReadiness
+  preferIoUring, requireIoUring, requireEpoll
 
 const ioBackendPolicy* =
   when defined(stagecoachIoUring):
     requireIoUring
-  elif defined(stagecoachReadiness) or not defined(linux):
-    requireReadiness
+  elif defined(stagecoachEpoll) or not defined(linux):
+    requireEpoll
   else:
     preferIoUring

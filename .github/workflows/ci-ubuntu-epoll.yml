@@ -1,4 +1,4 @@
-name: ci-ubuntu-readiness
+name: ci-ubuntu-epoll
 on: [push, pull_request]
 jobs:
   test:

@@ -22,7 +22,7 @@ what an agent needs beyond it.
 - `deps/` is vendored and not committed. Never edit files under
   `deps/stagelane/`; carry changes as a patch in `patches/`.
 - Stagelane is pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`;
-  `atlas rep` reproduces `atlas.lock`. The upstream persistent readiness API
+  `atlas rep` reproduces `atlas.lock`. The upstream persistent epoll API
   replaces the former PollFd patch. Apply
   `patches/stagelane-scheduler-cleanup.patch` after dependency setup: it makes
   worker scheduler cleanup available in non-`flowThreads` builds.

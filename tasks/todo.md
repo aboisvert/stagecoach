@@ -20,7 +20,7 @@ as a `workflow_call` workflow, parameterized by `runner` and `backend`.
 
 ## Task 2: Platform caller workflows
 
-**Description:** Add `ci-ubuntu-ring.yml`, `ci-ubuntu-readiness.yml`,
+**Description:** Add `ci-ubuntu-ring.yml`, `ci-ubuntu-epoll.yml`,
 `ci-macos.yml`, each calling the reusable workflow. Delete `ci.yml`.
 
 **Acceptance criteria:**

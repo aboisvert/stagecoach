@@ -19,7 +19,7 @@ die() { echo "run-tests: $*" >&2; exit 1; }
 case "${STAGECOACH_TEST_BACKEND:-auto}" in
   auto) ;;
   io_uring) FLAGS+=(-d:stagecoachIoUring -d:stagecoachRingTest -d:stagecoachBackendTest) ;;
-  epoll) FLAGS+=(-d:stagecoachReadiness -d:stagecoachBackendTest) ;;
+  epoll) FLAGS+=(-d:stagecoachEpoll -d:stagecoachBackendTest) ;;
   *) die "STAGECOACH_TEST_BACKEND must be auto, io_uring, or epoll" ;;
 esac
 

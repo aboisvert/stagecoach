@@ -3,9 +3,9 @@
 ## wrapper. `httprequest` and `httpresponse` drive this module; they keep no
 ## retry logic of their own.
 ##
-## Readiness waits follow a would-block result. Newer stagelane versions
-## register accepted sockets for persistent readiness and consume their own
-## readiness latches when the wait is made.
+## Epoll waits follow a would-block result. Newer stagelane versions register
+## accepted sockets for persistent epoll monitoring and consume their own
+## epoll latches when the wait is made.
 
 import std/[os, posix]
 import stagelane/core

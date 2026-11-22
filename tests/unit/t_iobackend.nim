@@ -6,9 +6,9 @@ suite "I/O backend selection":
   test "the compiled policy matches the requested backend":
     when defined(stagecoachIoUring):
       check ioBackendPolicy == requireIoUring
-    elif defined(stagecoachReadiness):
-      check ioBackendPolicy == requireReadiness
+    elif defined(stagecoachEpoll):
+      check ioBackendPolicy == requireEpoll
     elif defined(linux):
       check ioBackendPolicy == preferIoUring
     else:
-      check ioBackendPolicy == requireReadiness
+      check ioBackendPolicy == requireEpoll

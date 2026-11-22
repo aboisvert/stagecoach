@@ -84,8 +84,8 @@ proc makeListener(port, backlog: int, nodelay: bool): TcpListener =
     listenTcp(port, "0.0.0.0", bl)
 
 when defined(linux):
-  proc acceptReadiness(listener: TcpListener): TcpStream {.flow.} =
-    ## Keep readiness selected even if application code enables a ring later.
+  proc acceptEpoll(listener: TcpListener): TcpStream {.flow.} =
+    ## Keep epoll selected even if application code enables a ring later.
     while true:
       var sa: Sockaddr_in
       var len = SockLen(sizeof(sa))
@@ -397,7 +397,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
         try:
           when defined(linux):
             if useRing: stream = listener.accept()
-            else: stream = acceptReadiness(listener)
+            else: stream = acceptEpoll(listener)
           else:
             stream = listener.accept()
         except CancelledError:
@@ -435,7 +435,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           var backendOk = true
           var workerRing = false
           when defined(linux):
-            when ioBackendPolicy != requireReadiness:
+            when ioBackendPolicy != requireEpoll:
               var active = false
               when declared(stagecoachSchedCleanup):
                 when defined(stagecoachTestRingUnavailable):
@@ -451,7 +451,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
                 when ioBackendPolicy == requireIoUring:
                   backendOk = false
                 else:
-                  w.runtime.httpServer.log(lvlWarn, "io_uring unavailable; using readiness I/O")
+                  w.runtime.httpServer.log(lvlWarn, "io_uring unavailable; using epoll I/O")
           if reportWorkerStartup(w.runtime, not backendOk):
             let worker = newWorker(w.runtime, w.nThreads)
             run workerMain(w.runtime, w.idx, worker, workerRing)

@@ -142,7 +142,7 @@ when defined(linux) and defined(stagecoachRingTest):
     not sent and p.ctx.socket == INVALID_SOCKET
 
   suite "io_uring socket I/O":
-    test "a readiness socket stays on readiness after the ring is enabled":
+    test "an epoll socket stays on epoll after the ring is enabled":
       var p = newPair(newHttpServer(loglevel = lvlError))
       let reads = ringTestReads
       let writes = ringTestWrites

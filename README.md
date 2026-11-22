@@ -57,11 +57,11 @@ does not expose that cleanup in its normal build.
 
 ## I/O backend
 
-Linux workers prefer io_uring (Linux 5.11+) and fall back to epoll (aka "readiness") with a
+Linux workers prefer io_uring (Linux 5.11+) and fall back to epoll with a
 warning if it is unavailable. Compile with `-d:stagecoachIoUring` to require
 io_uring: `serve` fails if any worker cannot enable it. Compile with
-`-d:stagecoachReadiness` to require epoll/readiness instead. The flags are mutually
-exclusive; io_uring is Linux-only. macOS and BSD default to epoll/readiness.
+`-d:stagecoachEpoll` to require epoll instead. The flags are mutually
+exclusive; io_uring is Linux-only. macOS and BSD default to epoll.
 Within a flow handler, helper procs that call potentially suspending operations
 such as `reply`, `reject`, or `closeHttpSocket` must also be marked `{.flow.}`.
 
@@ -175,7 +175,7 @@ Layers:
 - `tests/unit/`: no listening socket or subprocess. Defaults, logging, close
   causes, `recv` classification, request line, headers, framing, and
   pipelining, plus `beginRequest`/`endRequest` and response framing over a
-  `socketpair`, including readiness and cancellation behavior.
+  `socketpair`, including epoll and cancellation behavior.
 - `tests/integration/`: end-to-end over real sockets. The fixture suites spawn
   `tests/fixture_server.nim` (configurable by CLI flags, counts close causes at
   `/stats`) on a free port and talk raw HTTP to it (`tests/helpers/`); the
@@ -192,8 +192,8 @@ Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 | CI status (`main`) | Platform | I/O backend under test | What the badge means |
 |---|---|---|---|
 | [![Ubuntu io_uring tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-ring.yml) | Linux (Ubuntu) | io_uring (`io_uring`) | Unit, integration, and example builds pass on Linux with io_uring, plus the backend startup and override checks. |
-| [![Ubuntu epoll tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-readiness.yml) | Linux (Ubuntu) | epoll (`epoll`) | Unit, integration, and example builds pass on Linux with the epoll backend. |
-| [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | readiness (`auto`, which selects readiness on macOS) | Unit, integration, and example builds pass on macOS. |
+| [![Ubuntu epoll tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-epoll.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-ubuntu-epoll.yml) | Linux (Ubuntu) | epoll (`epoll`) | Unit, integration, and example builds pass on Linux with the epoll backend. |
+| [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | epoll (`auto`, which selects epoll on macOS) | Unit, integration, and example builds pass on macOS. |
 
 A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
 
@@ -201,9 +201,9 @@ A badge reads **passing** when the latest run on `main` succeeded for that platf
 
 ### Linux I/O
 
-- Linux workers prefer io_uring on supported kernels and fall back to readiness
+- Linux workers prefer io_uring on supported kernels and fall back to epoll
   when it is unavailable. `-d:stagecoachIoUring` requires io_uring;
-  `-d:stagecoachReadiness` requires readiness. A required backend that cannot
+  `-d:stagecoachEpoll` requires epoll. A required backend that cannot
   start fails rather than silently falling back.
 - Ring-mode file responses use completion-based reads and writes, so a slow
   reader does not block the worker. Timeout, cancellation, and shutdown paths

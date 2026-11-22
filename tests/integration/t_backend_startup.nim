@@ -22,7 +22,7 @@ when defined(linux) and defined(stagecoachBackendTest):
       when defined(stagecoachRingTest):
         if ctx.ringIo: doAssert ringTestWrites > writes
       return
-    ctx.reply(if ctx.ringIo: "ring" else: "readiness")
+    ctx.reply(if ctx.ringIo: "ring" else: "epoll")
     when defined(stagecoachRingTest):
       if ctx.ringIo:
         doAssert ctx.flushSendBuf() == Complete
@@ -86,7 +86,7 @@ when defined(linux) and defined(stagecoachBackendTest):
         server = newHttpServer(loglevel = lvlWarn)
         server.logCallback = recordLog
         fallbackLogs.store(0, moRelaxed)
-        when defined(stagecoachRingTest) and not defined(stagecoachReadiness):
+        when defined(stagecoachRingTest) and not defined(stagecoachEpoll):
           let workersBefore = ringTestWorkerCount.load(moRelaxed)
         startServer(port)
         let client = connectRaw(port)
@@ -94,25 +94,25 @@ when defined(linux) and defined(stagecoachBackendTest):
         client.close()
         when defined(stagecoachIoUring):
           check response.body == "ring"
-        elif defined(stagecoachReadiness) or defined(stagecoachTestRingUnavailable) or
-            defined(stagecoachTestExpectReadiness):
-          check response.body == "readiness"
+        elif defined(stagecoachEpoll) or defined(stagecoachTestRingUnavailable) or
+            defined(stagecoachTestExpectEpoll):
+          check response.body == "epoll"
         elif defined(stagecoachRingTest):
           check response.body == "ring"
         else:
-          check response.body in ["ring", "readiness"]
+          check response.body in ["ring", "epoll"]
         let fileClient = connectRaw(port)
         check fileClient.get("/file", "Connection: close\r\n").body == expectedFile
         fileClient.close()
         when defined(stagecoachTestEnableRingInHandler):
           for _ in 0 ..< 5:
             let next = connectRaw(port)
-            check next.get("/", "Connection: close\r\n").body == "readiness"
+            check next.get("/", "Connection: close\r\n").body == "epoll"
             next.close()
-        when (defined(stagecoachTestRingUnavailable) or defined(stagecoachTestExpectReadiness)) and
-            not defined(stagecoachReadiness):
+        when (defined(stagecoachTestRingUnavailable) or defined(stagecoachTestExpectEpoll)) and
+            not defined(stagecoachEpoll):
           check fallbackLogs.load(moRelaxed) == 2
-        when defined(stagecoachRingTest) and not defined(stagecoachReadiness):
+        when defined(stagecoachRingTest) and not defined(stagecoachEpoll):
           check ringTestWorkerCount.load(moRelaxed) - workersBefore == 2
         stop(server, 0)
         wait(server)

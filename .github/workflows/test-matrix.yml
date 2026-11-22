@@ -37,4 +37,4 @@ jobs:
         run: |
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachTestRingUnavailable tests/integration/t_backend_startup.nim
           nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachIoUring -d:stagecoachTestRingFailOne tests/integration/t_backend_startup.nim
-          nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachReadiness -d:stagecoachTestEnableRingInHandler tests/integration/t_backend_startup.nim
+          nim c -r --hints:off --threads:on --outdir:bin -d:stagecoachBackendTest -d:stagecoachEpoll -d:stagecoachTestEnableRingInHandler tests/integration/t_backend_startup.nim
