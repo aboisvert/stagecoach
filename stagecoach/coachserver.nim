@@ -1,4 +1,4 @@
-const StagecoachVersion* = "0.3.0"
+const StagecoachVersion* = "0.4.0"
 
 import std/[logging, atomics]
 from std/posix import SocketHandle, INVALID_SOCKET, SIGINT, SIGTERM, onSignal, `==`, close

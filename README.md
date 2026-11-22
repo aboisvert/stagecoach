@@ -25,6 +25,7 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 - [Running Linux tests on macOS (Docker)](#running-linux-tests-on-macos-docker)
 - [Testing](#testing)
 - [CI status](#ci-status)
+- [Release notes, 0.4.0](#release-notes-040)
 - [Release notes, 0.3.0](#release-notes-030)
 - [Release notes, 0.2 (hardening + lifecycle)](#release-notes-02-hardening--lifecycle)
 - [Release notes, 0.1 (stagelane port)](#release-notes-01-stagelane-port)
@@ -196,6 +197,33 @@ Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 | [![macOS tests](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml/badge.svg?branch=main)](https://github.com/aboisvert/stagecoach/actions/workflows/ci-macos.yml) | macOS | epoll (`auto`, which selects epoll on macOS) | Unit, integration, and example builds pass on macOS. |
 
 A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
+
+## Release notes, 0.4.0
+
+### I/O backend naming and documentation
+
+- The readiness-based fallback is now called **epoll** everywhere it matters:
+  compile with `-d:stagecoachEpoll` (replaces `-d:stagecoachReadiness`), set
+  `STAGECOACH_TEST_BACKEND=epoll` for tests and fixtures, and use the
+  `ci-ubuntu-epoll` workflow name when reading CI. **io_uring** remains the
+  Linux completion path (`-d:stagecoachIoUring`, `STAGECOACH_TEST_BACKEND=io_uring`).
+- README and worker logs spell out the three modes clearly: **auto** on Linux
+  tries io_uring and falls back to epoll with a warning; **required** flags
+  fail `serve` if that backend cannot start; macOS and BSD use epoll under
+  auto. Epoll here means stagelane's persistent edge-triggered poll set, not a
+  separate legacy dispatcher.
+- **Migration from 0.3.0:** rename `stagecoachReadiness` → `stagecoachEpoll` and
+  test env `readiness` → `epoll`. Behavior is unchanged; only names and docs
+  moved.
+
+### Fixes and docs
+
+- Fix a race between `stop()` and runtime teardown that could tear down workers
+  while connection tasks were still draining.
+- Document that `--mm:atomicArc` is required when worker threads share `ref`
+  server state (already set in this repo's `nim.cfg`).
+- CI exercises Nim 2.4.2. README adds a table of contents, per-platform CI
+  status badges, and trimmed logo assets.
 
 ## Release notes, 0.3.0
 
