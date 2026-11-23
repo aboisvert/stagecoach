@@ -24,9 +24,6 @@ export httpservercore
 when defined(stagecoachRingTest):
   var ringTestWorkerCount* {.global.}: Atomic[int]
 
-when not declared(stagecoachSchedCleanup):
-  {.error: "Stagecoach requires patches/stagelane-scheduler-cleanup.patch".}
-
 when defined(linux):
   # numbers straight from the Linux headers (<asm-generic/socket.h>: SO_REUSEPORT,
   # <netinet/tcp.h>: TCP_DEFER_ACCEPT); macOS supports neither, so the
@@ -437,13 +434,12 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
           when defined(linux):
             when ioBackendPolicy != requireEpoll:
               var active = false
-              when declared(stagecoachSchedCleanup):
-                when defined(stagecoachTestRingUnavailable):
-                  discard
-                elif defined(stagecoachTestRingFailOne):
-                  if w.idx != 1: active = ringEnable()
-                else:
-                  active = ringEnable()
+              when defined(stagecoachTestRingUnavailable):
+                discard
+              elif defined(stagecoachTestRingFailOne):
+                if w.idx != 1: active = ringEnable()
+              else:
+                active = ringEnable()
               when defined(stagecoachRingTest):
                 if active: discard ringTestWorkerCount.fetchAdd(1, moRelaxed)
               workerRing = active
@@ -456,8 +452,7 @@ template serve*(httpSrv: HttpServer, bindPort: int, handler: untyped, osThreads:
             let worker = newWorker(w.runtime, w.nThreads)
             run workerMain(w.runtime, w.idx, worker, workerRing)
         finally:
-          when declared(stagecoachSchedCleanup):
-            releaseSched()
+          releaseSched()
 
     rt.threads.setLen(nThreads)
     var created = 0

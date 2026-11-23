@@ -22,12 +22,11 @@ jobs:
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: 2.4.2
-      - name: Install stagelane and apply scheduler cleanup patch
+      - name: Install stagelane
         run: |
           mkdir -p deps
           git clone https://github.com/ghazalialshafi/stagelane deps/stagelane
-          git -C deps/stagelane checkout f5b7cad5babd884baf9b21f8ea11ee9558d02cff
-          git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
+          git -C deps/stagelane checkout 6c6df8a7868330c042cdfb0725b23f1874049bfa
       - uses: extractions/setup-just@v2
       - run: just test-unit
       - run: just test-integration

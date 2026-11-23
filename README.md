@@ -25,6 +25,7 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 - [Running Linux tests on macOS (Docker)](#running-linux-tests-on-macos-docker)
 - [Testing](#testing)
 - [CI status](#ci-status)
+- [Release notes, 0.4.1](#release-notes-041)
 - [Release notes, 0.4.0](#release-notes-040)
 - [Release notes, 0.3.0](#release-notes-030)
 - [Release notes, 0.2 (hardening + lifecycle)](#release-notes-02-hardening--lifecycle)
@@ -34,27 +35,20 @@ This branch is **HTTP-only**. WebSocket, multipart, and the old thread-per-reque
 ## Requirements
 
 - Nim ≥ 2.2.0
-- [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas), pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`
+- [stagelane](https://github.com/ghazalialshafi/stagelane) vendored via [Atlas](https://github.com/nim-lang/atlas), pinned to `6c6df8a7868330c042cdfb0725b23f1874049bfa`
 - Build with `--threads:on --mm:atomicArc`. **`--mm:atomicArc` is required for multi-threaded use**: worker threads share `ref` objects such as `HttpServer`, and the default ORC/ARC reference counts are not atomic, so concurrent retain/release can corrupt memory (intermittent segfaults). This repository's `nim.cfg` sets both flags; add them to your own project's `nim.cfg` or command line.
 
 Handlers must be `{.flow.}` procs and take `HttpContext`. Import [`stagecoach/flow`](stagecoach/flow.nim) in application code so `{.flow.}` works in your modules.
 
 ## Dependencies
 
-**Installation limitation:** Use a source checkout with Atlas as shown below.
-A direct Nimble installation or transitive Nimble dependency currently installs
-unpatched Stagelane and cannot compile Stagecoach.
-
 ```sh
 atlas install   # clones stagelane into deps/ and patches nim.cfg
-git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
 ```
 
 Commit `nim.cfg` and `atlas.lock`. The dependency is pinned to a commit; use
-`atlas rep` to reproduce the lockfile. Apply the scheduler cleanup patch to a
-fresh checkout; if it is already applied, do not apply it again. The patch
-closes per-worker scheduler resources when threads exit; the upstream revision
-does not expose that cleanup in its normal build.
+`atlas rep` to reproduce the lockfile. No local patches to Stagelane are
+required.
 
 ## I/O backend
 
@@ -198,6 +192,18 @@ Shared support (`tests/helpers/`, `tests/fixture_server.nim`,
 
 A badge reads **passing** when the latest run on `main` succeeded for that platform, **failing** when a step failed, and **no status** before the first run. Each badge links to its workflow's run history.
 
+## Release notes, 0.4.1
+
+### Stagelane dependency
+
+- Pinned to stagelane `6c6df8a7868330c042cdfb0725b23f1874049bfa` (upstream
+  `main`), which includes worker scheduler cleanup. The local scheduler
+  cleanup patch is removed; `patches/` no longer exists.
+- **Migration from 0.4.0:** do not apply `stagelane-scheduler-cleanup.patch`.
+  Re-run `atlas rep` (or `atlas install`) to pick up the new pin. Applying the
+  old patch to the new revision will fail.
+- The compile-time check for the patch and its marker constant are removed.
+
 ## Release notes, 0.4.0
 
 ### I/O backend naming and documentation
@@ -236,14 +242,11 @@ A badge reads **passing** when the latest run on `main` succeeded for that platf
 - Ring-mode file responses use completion-based reads and writes, so a slow
   reader does not block the worker. Timeout, cancellation, and shutdown paths
   continue to be covered by both backend test suites.
-- Stagelane is pinned to `f5b7cad5babd884baf9b21f8ea11ee9558d02cff`.
-  **Migration:** replace the former PollFd patch with
-  `patches/stagelane-scheduler-cleanup.patch` after dependency setup. The new
-  patch is required on every platform to release worker scheduler resources.
+- Stagelane is pinned to `6c6df8a7868330c042cdfb0725b23f1874049bfa`, which
+  includes worker scheduler cleanup upstream (no patch needed).
   Helper procs called from flow handlers must themselves be `{.flow.}` when
   they call potentially suspending operations such as `closeHttpSocket`.
-- **Installation limitation:** direct and transitive Nimble installations
-  cannot currently compile; use the Atlas source-checkout setup above.
+
 
 ### More HTTP hardening
 

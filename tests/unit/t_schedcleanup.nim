@@ -3,8 +3,6 @@ when defined(linux) and defined(stagecoachRingTest):
   import std/[os, posix, unittest, atomics]
   import stagelane/[core, sched, transform, uring]
 
-  static: doAssert declared(stagecoachSchedCleanup)
-
   var drainCalls: Atomic[int]
 
   proc onDrain() {.nimcall.} =

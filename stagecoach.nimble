@@ -1,4 +1,4 @@
-version       = "0.4.0"
+version       = "0.4.1"
 author        = "Alex Boisvert"
 description   = "HTTP/1.1 server on the stagelane M:N async runtime (HTTP only on this branch)"
 license       = "MIT"
@@ -7,7 +7,7 @@ skipDirs = @["examples"]
 
 
 requires "nim >= 2.2.0"
-requires "https://github.com/ghazalialshafi/stagelane#f5b7cad5babd884baf9b21f8ea11ee9558d02cff"
+requires "https://github.com/ghazalialshafi/stagelane#6c6df8a7868330c042cdfb0725b23f1874049bfa"
 
 proc compileAndRunExample(name: string, flags = "") =
   exec "nim c -r --hints:off --outdir:bin " & flags & " examples/" & name & ".nim"

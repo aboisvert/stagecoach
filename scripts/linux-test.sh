@@ -14,7 +14,7 @@ export HOST_UID="$(id -u)" HOST_GID="$(id -g)"
 # the Dockerfile reuses an existing group.
 [ -n "${PLATFORM:-}" ] || unset PLATFORM
 
-STAGELANE_COMMIT=f5b7cad5babd884baf9b21f8ea11ee9558d02cff
+STAGELANE_COMMIT=6c6df8a7868330c042cdfb0725b23f1874049bfa
 COMPOSE=(docker compose)
 case "${STAGECOACH_DOCKER_ALLOW_IO_URING:-0}" in
   0) ;;
@@ -36,7 +36,6 @@ setup_stagelane='
   fi
   git -C deps/stagelane checkout -f '"$STAGELANE_COMMIT"'
   git -C deps/stagelane reset --hard '"$STAGELANE_COMMIT"'
-  git -C deps/stagelane apply ../../patches/stagelane-scheduler-cleanup.patch
 '
 
 cmd="${1:-test}"; [ $# -gt 0 ] && shift
