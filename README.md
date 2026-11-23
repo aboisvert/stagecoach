@@ -197,8 +197,9 @@ A badge reads **passing** when the latest run on `main` succeeded for that platf
 ### Stagelane dependency
 
 - Pinned to stagelane `6c6df8a7868330c042cdfb0725b23f1874049bfa` (upstream
-  `main`), which includes worker scheduler cleanup. The local scheduler
-  cleanup patch is removed; `patches/` no longer exists.
+  `main`), which includes worker scheduler cleanup from
+  [stagelane PR #6](https://github.com/ghazalialshafi/stagelane/pull/6). The
+  local scheduler cleanup patch is removed; `patches/` no longer exists.
 - **Migration from 0.4.0:** do not apply `stagelane-scheduler-cleanup.patch`.
   Re-run `atlas rep` (or `atlas install`) to pick up the new pin. Applying the
   old patch to the new revision will fail.
